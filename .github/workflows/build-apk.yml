@@ -1,42 +1,37 @@
-name: Android Build
+name: Build APK
 
-"on":
+on:
 push:
 branches:
 - main
-workflow_dispatch: {}
+workflow_dispatch:
 
 jobs:
 build:
+name: Build Debug APK
 runs-on: ubuntu-latest
-steps:
-- name: Checkout repository
-uses: actions/checkout@v4
 
-  - name: Set up Java
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
+
+  - name: Set up JDK 17
     uses: actions/setup-java@v4
     with:
       distribution: temurin
       java-version: "17"
 
-  - name: Set up Android
+  - name: Set up Android SDK
     uses: android-actions/setup-android@v3
-
-  - name: Accept Android licenses
-    run: yes | sdkmanager --licenses || true
-
-  - name: Install Android SDK 37
-    run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
 
   - name: Make Gradle executable
     run: chmod +x ./gradlew
 
   - name: Build debug APK
-    run: ./gradlew assembleDebug --stacktrace
+    run: ./gradlew assembleDebug
 
   - name: Upload APK
     uses: actions/upload-artifact@v4
     with:
-      name: adblocker-debug-apk
-      path: app/build/outputs/apk/debug/*.apk
-      if-no-files-found: error
+      name: app-debug-apk
+      path: app/build/outputs/apk/debug/app-debug.apk
