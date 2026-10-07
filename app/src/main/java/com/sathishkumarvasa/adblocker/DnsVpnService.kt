@@ -4,9 +4,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -74,21 +76,56 @@ class DnsVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        createNotificationChannel()
-
-        startForeground(
-            NOTIFICATION_ID,
-            createNotification()
-        )
-
         if (!preferences.enabled.value) {
             stopVpn()
+            return START_NOT_STICKY
+        }
+
+        try {
+            createNotificationChannel()
+            startVpnForeground()
+        } catch (error: Exception) {
+
+            Log.e(
+                TAG,
+                "Unable to start foreground service",
+                error
+            )
+
+            preferences.setEnabled(false)
+            stopVpn()
+
             return START_NOT_STICKY
         }
 
         startVpn()
 
         return START_STICKY
+    }
+
+    private fun startVpnForeground() {
+
+        val notification =
+            createNotification()
+
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.Q
+        ) {
+
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+
+        } else {
+
+            startForeground(
+                NOTIFICATION_ID,
+                notification
+            )
+        }
     }
 
     private fun startVpn() {
@@ -104,20 +141,16 @@ class DnsVpnService : VpnService() {
 
         try {
 
-            /*
-             * The VPN interface exposes a private IPv4
-             * address to the Android networking stack.
-             *
-             * We route only DNS traffic through the VPN.
-             */
-            vpnInterface =
+            val builder =
                 Builder()
                     .setSession(
                         getString(
                             R.string.app_name
                         )
                     )
-                    .setMtu(1500)
+                    .setMtu(
+                        VPN_MTU
+                    )
                     .addAddress(
                         VPN_ADDRESS,
                         32
@@ -129,10 +162,25 @@ class DnsVpnService : VpnService() {
                     .addDnsServer(
                         DNS_ADDRESS
                     )
-                    .setBlocking(false)
-                    .establish()
+
+            /*
+             * We only route DNS traffic through
+             * the VPN.
+             *
+             * This prevents the VPN from becoming
+             * the default route for all traffic.
+             */
+            vpnInterface =
+                builder.establish()
 
             if (vpnInterface == null) {
+
+                Log.e(
+                    TAG,
+                    "VPN interface could not be established"
+                )
+
+                stopVpn()
                 return
             }
 
@@ -141,11 +189,16 @@ class DnsVpnService : VpnService() {
                     runVpnLoop()
                 }
 
+            Log.d(
+                TAG,
+                "DNS VPN started"
+            )
+
         } catch (error: Exception) {
 
-            android.util.Log.e(
+            Log.e(
                 TAG,
-                "Unable to start VPN",
+                "Unable to establish VPN",
                 error
             )
 
@@ -160,29 +213,68 @@ class DnsVpnService : VpnService() {
                 ?: return
 
         val input =
-            FileInputStream(
-                descriptor.fileDescriptor
-            )
+            try {
+                FileInputStream(
+                    descriptor.fileDescriptor
+                )
+            } catch (error: Exception) {
+
+                Log.e(
+                    TAG,
+                    "Unable to open VPN input",
+                    error
+                )
+
+                return
+            }
 
         val output =
-            FileOutputStream(
-                descriptor.fileDescriptor
-            )
+            try {
+                FileOutputStream(
+                    descriptor.fileDescriptor
+                )
+            } catch (error: Exception) {
+
+                Log.e(
+                    TAG,
+                    "Unable to open VPN output",
+                    error
+                )
+
+                try {
+                    input.close()
+                } catch (_: Exception) {
+                }
+
+                return
+            }
 
         val packetBuffer =
-            ByteArray(32767)
+            ByteArray(
+                MAX_VPN_PACKET_SIZE
+            )
 
         try {
 
-            while (serviceScope.isActive) {
+            while (
+                serviceScope.isActive &&
+                preferences.enabled.value &&
+                vpnInterface != null
+            ) {
 
                 val length =
                     try {
-                        input.read(packetBuffer)
+                        input.read(
+                            packetBuffer
+                        )
                     } catch (error: Exception) {
 
-                        if (serviceScope.isActive) {
-                            android.util.Log.e(
+                        if (
+                            serviceScope.isActive &&
+                            preferences.enabled.value
+                        ) {
+
+                            Log.e(
                                 TAG,
                                 "VPN read failed",
                                 error
@@ -193,7 +285,9 @@ class DnsVpnService : VpnService() {
                     }
 
                 if (length <= 0) {
+
                     delay(10)
+
                     continue
                 }
 
@@ -224,7 +318,10 @@ class DnsVpnService : VpnService() {
         output: FileOutputStream
     ) {
 
-        if (length < IPV4_HEADER_MIN_LENGTH) {
+        if (
+            length <
+            IPV4_HEADER_MIN_LENGTH
+        ) {
             return
         }
 
@@ -245,14 +342,34 @@ class DnsVpnService : VpnService() {
             (packet[0].toInt() and 0x0F) * 4
 
         if (
-            ipHeaderLength < IPV4_HEADER_MIN_LENGTH ||
+            ipHeaderLength <
+            IPV4_HEADER_MIN_LENGTH ||
             ipHeaderLength > length
         ) {
             return
         }
 
         /*
-         * We currently support UDP DNS only.
+         * Ignore fragmented IPv4 packets.
+         *
+         * DNS queries handled here should not
+         * require IP fragmentation.
+         */
+        val flagsAndFragment =
+            readUnsignedShort(
+                packet,
+                6
+            )
+
+        if (
+            (flagsAndFragment and
+                IP_FRAGMENT_OFFSET_MASK) != 0
+        ) {
+            return
+        }
+
+        /*
+         * UDP only.
          */
         val protocol =
             packet[9].toInt() and 0xFF
@@ -261,7 +378,11 @@ class DnsVpnService : VpnService() {
             return
         }
 
-        if (length < ipHeaderLength + UDP_HEADER_LENGTH) {
+        if (
+            length <
+            ipHeaderLength +
+            UDP_HEADER_LENGTH
+        ) {
             return
         }
 
@@ -286,30 +407,49 @@ class DnsVpnService : VpnService() {
                 udpOffset + 4
             )
 
-        if (udpLength < UDP_HEADER_LENGTH) {
+        if (
+            udpLength <
+            UDP_HEADER_LENGTH
+        ) {
             return
         }
 
         if (
-            udpOffset + udpLength > length
+            udpOffset +
+            udpLength > length
         ) {
             return
         }
 
         /*
-         * Only DNS requests.
+         * We only process DNS requests
+         * addressed to port 53.
          */
-        if (destinationPort != DNS_PORT) {
+        if (
+            destinationPort != DNS_PORT
+        ) {
             return
         }
 
         val dnsOffset =
-            udpOffset + UDP_HEADER_LENGTH
+            udpOffset +
+                UDP_HEADER_LENGTH
 
         val dnsLength =
-            udpLength - UDP_HEADER_LENGTH
+            udpLength -
+                UDP_HEADER_LENGTH
 
-        if (dnsLength < DNS_HEADER_LENGTH) {
+        if (
+            dnsLength <
+            DNS_HEADER_LENGTH
+        ) {
+            return
+        }
+
+        if (
+            dnsLength >
+            MAX_DNS_PACKET_SIZE
+        ) {
             return
         }
 
@@ -335,9 +475,13 @@ class DnsVpnService : VpnService() {
         }
 
         /*
-         * Check the hostname against the filter.
+         * Blocked hostname.
          */
-        if (filter.isBlocked(hostname)) {
+        if (
+            filter.isBlocked(
+                hostname
+            )
+        ) {
 
             preferences.incrementBlockedCount()
 
@@ -360,9 +504,10 @@ class DnsVpnService : VpnService() {
         }
 
         /*
-         * Allowed request.
+         * Allowed hostname.
          *
-         * Send the DNS query to the upstream resolver.
+         * Forward the DNS request to the
+         * upstream resolver.
          */
         forwardDnsQuery(
             originalPacket = packet,
@@ -385,20 +530,41 @@ class DnsVpnService : VpnService() {
         output: FileOutputStream
     ) {
 
+        if (
+            dnsQuery.isEmpty() ||
+            dnsQuery.size >
+            MAX_DNS_PACKET_SIZE
+        ) {
+            return
+        }
+
         val socket =
-            DatagramSocket()
+            try {
+                DatagramSocket()
+            } catch (error: Exception) {
+
+                Log.w(
+                    TAG,
+                    "Could not create DNS socket",
+                    error
+                )
+
+                return
+            }
 
         try {
 
             /*
-             * Critical:
+             * Important:
              *
-             * Protect the upstream socket so the DNS
-             * request does not loop back into this VPN.
+             * Protect the upstream socket from
+             * the VPN itself. Otherwise the DNS
+             * request could loop back through
+             * this VPN.
              */
             if (!protect(socket)) {
 
-                android.util.Log.w(
+                Log.w(
                     TAG,
                     "Could not protect DNS socket"
                 )
@@ -422,7 +588,9 @@ class DnsVpnService : VpnService() {
                     server
                 )
 
-            socket.send(request)
+            socket.send(
+                request
+            )
 
             val responseBuffer =
                 ByteArray(
@@ -439,7 +607,9 @@ class DnsVpnService : VpnService() {
                 responsePacket
             )
 
-            if (responsePacket.length <= 0) {
+            if (
+                responsePacket.length <= 0
+            ) {
                 return
             }
 
@@ -461,10 +631,10 @@ class DnsVpnService : VpnService() {
         } catch (error: Exception) {
 
             /*
-             * Do not crash the VPN because an upstream
-             * DNS request failed.
+             * DNS failures should not crash
+             * the VPN service.
              */
-            android.util.Log.w(
+            Log.w(
                 TAG,
                 "Upstream DNS request failed",
                 error
@@ -493,18 +663,31 @@ class DnsVpnService : VpnService() {
             return
         }
 
+        if (
+            dnsResponse.size >
+            MAX_DNS_PACKET_SIZE
+        ) {
+            return
+        }
+
+        if (
+            originalLength <
+            ipHeaderLength +
+            UDP_HEADER_LENGTH
+        ) {
+            return
+        }
+
         /*
-         * Extract original IPv4 addresses.
+         * Original packet:
          *
-         * Original:
+         * source      = Android/VPN client
+         * destination = 10.8.0.1
          *
-         * source      = Android application
-         * destination = VPN DNS address
+         * Response packet:
          *
-         * Response:
-         *
-         * source      = VPN DNS address
-         * destination = Android application
+         * source      = 10.8.0.1
+         * destination = Android/VPN client
          */
         val originalSourceIp =
             originalPacket.copyOfRange(
@@ -538,15 +721,16 @@ class DnsVpnService : VpnService() {
             IPV4_HEADER_MIN_LENGTH +
                 udpLength
 
-        /*
-         * Prevent malformed/oversized packets.
-         */
-        if (ipLength > 65535) {
+        if (
+            ipLength > MAX_IPV4_PACKET_SIZE
+        ) {
             return
         }
 
         val response =
-            ByteArray(ipLength)
+            ByteArray(
+                ipLength
+            )
 
         /*
          * IPv4 header.
@@ -554,15 +738,9 @@ class DnsVpnService : VpnService() {
         response[0] =
             0x45.toByte()
 
-        /*
-         * DSCP / ECN.
-         */
         response[1] =
             0
 
-        /*
-         * Total packet length.
-         */
         writeUnsignedShort(
             response,
             2,
@@ -572,14 +750,20 @@ class DnsVpnService : VpnService() {
         /*
          * Identification.
          */
-        response[4] = 0
-        response[5] = 0
+        response[4] =
+            0
+
+        response[5] =
+            0
 
         /*
-         * Don't fragment / fragment offset.
+         * Flags / fragment offset.
          */
-        response[6] = 0
-        response[7] = 0
+        response[6] =
+            0
+
+        response[7] =
+            0
 
         /*
          * TTL.
@@ -594,10 +778,13 @@ class DnsVpnService : VpnService() {
             UDP_PROTOCOL.toByte()
 
         /*
-         * Header checksum initially zero.
+         * Checksum initially zero.
          */
-        response[10] = 0
-        response[11] = 0
+        response[10] =
+            0
+
+        response[11] =
+            0
 
         System.arraycopy(
             responseSourceIp,
@@ -653,10 +840,14 @@ class DnsVpnService : VpnService() {
         )
 
         /*
-         * IPv4 permits a zero UDP checksum.
+         * Zero UDP checksum is valid for
+         * IPv4 UDP.
          */
-        response[26] = 0
-        response[27] = 0
+        response[26] =
+            0
+
+        response[27] =
+            0
 
         /*
          * DNS payload.
@@ -665,18 +856,22 @@ class DnsVpnService : VpnService() {
             dnsResponse,
             0,
             response,
-            28,
+            IPV4_HEADER_MIN_LENGTH +
+                UDP_HEADER_LENGTH,
             dnsResponse.size
         )
 
         try {
 
-            output.write(response)
+            output.write(
+                response
+            )
+
             output.flush()
 
         } catch (error: Exception) {
 
-            android.util.Log.w(
+            Log.w(
                 TAG,
                 "Could not write DNS response",
                 error
@@ -739,15 +934,21 @@ class DnsVpnService : VpnService() {
         val end =
             offset + length
 
-        while (index + 1 < end) {
+        while (
+            index + 1 < end
+        ) {
 
             val word =
                 ((data[index].toInt() and 0xFF) shl 8) or
                     (data[index + 1].toInt() and 0xFF)
 
-            sum += word
+            sum +=
+                word.toLong()
 
-            while (sum ushr 16 != 0L) {
+            while (
+                (sum ushr 16) != 0L
+            ) {
+
                 sum =
                     (sum and 0xFFFFL) +
                         (sum ushr 16)
@@ -759,11 +960,13 @@ class DnsVpnService : VpnService() {
         if (index < end) {
 
             sum +=
-                (data[index].toInt() and 0xFF)
-                    .toLong() shl 8
+                ((data[index].toInt() and 0xFF)
+                    .toLong() shl 8)
         }
 
-        while (sum ushr 16 != 0L) {
+        while (
+            (sum ushr 16) != 0L
+        ) {
 
             sum =
                 (sum and 0xFFFFL) +
@@ -771,7 +974,8 @@ class DnsVpnService : VpnService() {
         }
 
         return (
-            sum.inv() and 0xFFFFL
+            sum.inv() and
+                0xFFFFL
             ).toInt()
     }
 
@@ -786,14 +990,14 @@ class DnsVpnService : VpnService() {
                 rules
             )
 
-            android.util.Log.d(
+            Log.d(
                 TAG,
                 "Loaded ${rules.size} filter rules"
             )
 
         } catch (error: Exception) {
 
-            android.util.Log.e(
+            Log.e(
                 TAG,
                 "Could not load stored filter rules",
                 error
@@ -813,16 +1017,24 @@ class DnsVpnService : VpnService() {
 
         vpnInterface = null
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        try {
 
-            stopForeground(
-                STOP_FOREGROUND_REMOVE
-            )
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.N
+            ) {
 
-        } else {
+                stopForeground(
+                    STOP_FOREGROUND_REMOVE
+                )
 
-            @Suppress("DEPRECATION")
-            stopForeground(true)
+            } else {
+
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+
+        } catch (_: Exception) {
         }
 
         stopSelf()
@@ -891,6 +1103,17 @@ class DnsVpnService : VpnService() {
         )
     }
 
+    override fun onRevoke() {
+
+        preferences.setEnabled(
+            false
+        )
+
+        stopVpn()
+
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
 
         vpnJob?.cancel()
@@ -908,13 +1131,6 @@ class DnsVpnService : VpnService() {
         super.onDestroy()
     }
 
-    override fun onRevoke() {
-
-        stopVpn()
-
-        super.onRevoke()
-    }
-
     companion object {
 
         const val ACTION_STOP =
@@ -930,13 +1146,14 @@ class DnsVpnService : VpnService() {
             1001
 
         /*
-         * VPN interface address.
+         * Private address assigned to the VPN
+         * interface.
          */
         private const val VPN_ADDRESS =
             "10.8.0.2"
 
         /*
-         * DNS address exposed through the VPN.
+         * DNS address exposed by the VPN.
          */
         private const val DNS_ADDRESS =
             "10.8.0.1"
@@ -962,8 +1179,20 @@ class DnsVpnService : VpnService() {
         private const val DNS_HEADER_LENGTH =
             12
 
+        private const val VPN_MTU =
+            1500
+
+        private const val MAX_VPN_PACKET_SIZE =
+            32767
+
         private const val MAX_DNS_PACKET_SIZE =
             4096
+
+        private const val MAX_IPV4_PACKET_SIZE =
+            65535
+
+        private const val IP_FRAGMENT_OFFSET_MASK =
+            0x1FFF
 
         private const val UPSTREAM_TIMEOUT_MS =
             3000
