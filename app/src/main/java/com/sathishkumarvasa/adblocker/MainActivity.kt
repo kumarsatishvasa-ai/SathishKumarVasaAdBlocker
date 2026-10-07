@@ -2,26 +2,46 @@ package com.sathishkumarvasa.adblocker
 
 import android.content.Intent
 import android.net.VpnService
-import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.widget.Button
+import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var statusText: TextView
+    private lateinit var toggleButton: Button
+    private lateinit var blockedCountText: TextView
+    private lateinit var ruleCountText: TextView
+    private lateinit var updateButton: Button
+    private lateinit var resetButton: Button
 
     private lateinit var preferences: AppPreferences
+    private lateinit var repository: FilterRepository
 
-    /*
-     * Android VPN permission result.
-     */
     private val vpnPermissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
-        ) {
+        ) { result ->
 
-            if (it.resultCode == RESULT_OK) {
-                startVpnService()
+            if (result.resultCode == RESULT_OK) {
+                enableProtection()
+            } else {
+                preferences.setEnabled(false)
+                updateUi()
+
+                Toast.makeText(
+                    this,
+                    "VPN permission is required for protection.",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
 
@@ -30,95 +50,106 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onCreate(savedInstanceState)
 
+        setContentView(
+            R.layout.activity_main
+        )
+
+        initializeDependencies()
+        initializeViews()
+        initializeListeners()
+
+        updateUi()
+    }
+
+    private fun initializeDependencies() {
+
         preferences =
             AppPreferences(
                 applicationContext
             )
 
-        setContentView(
-            R.layout.activity_main
-        )
-
-        setupViews()
-
-        /*
-         * If the app was already enabled when the
-         * Activity was recreated, refresh the UI.
-         */
-        updateUi()
+        repository =
+            FilterRepository(
+                applicationContext,
+                preferences
+            )
     }
 
-    private fun setupViews() {
+    private fun initializeViews() {
 
-        /*
-         * These IDs should exist in activity_main.xml.
-         *
-         * If your existing XML uses different IDs,
-         * change the IDs here to match it.
-         */
-
-        val enableButton =
-            findViewById<android.view.View>(
-                R.id.enableButton
+        statusText =
+            findViewById(
+                R.id.statusText
             )
 
-        val disableButton =
-            findViewById<android.view.View>(
-                R.id.disableButton
+        toggleButton =
+            findViewById(
+                R.id.toggleButton
             )
 
-        enableButton.setOnClickListener {
+        blockedCountText =
+            findViewById(
+                R.id.blockedCountText
+            )
 
-            enableAdBlocker()
+        ruleCountText =
+            findViewById(
+                R.id.ruleCountText
+            )
+
+        updateButton =
+            findViewById(
+                R.id.updateButton
+            )
+
+        resetButton =
+            findViewById(
+                R.id.resetButton
+            )
+    }
+
+    private fun initializeListeners() {
+
+        toggleButton.setOnClickListener {
+
+            if (
+                preferences.enabled.value
+            ) {
+                disableProtection()
+            } else {
+                requestVpnPermission()
+            }
         }
 
-        disableButton.setOnClickListener {
+        updateButton.setOnClickListener {
+            updateFilters()
+        }
 
-            disableAdBlocker()
+        resetButton.setOnClickListener {
+            resetBlockedCounter()
         }
     }
 
-    private fun enableAdBlocker() {
+    private fun requestVpnPermission() {
 
-        /*
-         * Store enabled state first.
-         */
-        preferences.setEnabled(true)
-
-        /*
-         * Android requires explicit user approval before
-         * an application can establish a VPN.
-         */
         val intent =
             VpnService.prepare(this)
 
-        if (intent != null) {
+        if (intent == null) {
+
+            enableProtection()
+
+        } else {
 
             vpnPermissionLauncher.launch(
                 intent
             )
-
-        } else {
-
-            /*
-             * Permission was already granted.
-             */
-            startVpnService()
         }
-
-        updateUi()
     }
 
-    private fun disableAdBlocker() {
+    private fun enableProtection() {
 
-        preferences.setEnabled(false)
-
-        stopVpnService()
-
-        updateUi()
-    }
-
-    private fun startVpnService() {
+        preferences.setEnabled(true)
 
         val intent =
             Intent(
@@ -126,32 +157,121 @@ class MainActivity : ComponentActivity() {
                 DnsVpnService::class.java
             )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        try {
 
-            ContextCompat.startForegroundService(
+            androidx.core.content.ContextCompat
+                .startForegroundService(
+                    this,
+                    intent
+                )
+
+            updateUi()
+
+            Toast.makeText(
                 this,
-                intent
-            )
+                "Protection enabled.",
+                Toast.LENGTH_SHORT
+            ).show()
 
-        } else {
+        } catch (error: Exception) {
 
-            startService(intent)
+            preferences.setEnabled(false)
+
+            updateUi()
+
+            Toast.makeText(
+                this,
+                "Unable to start VPN: ${
+                    error.message ?: "Unknown error"
+                }",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
-    private fun stopVpnService() {
+    private fun disableProtection() {
+
+        preferences.setEnabled(false)
 
         val intent =
             Intent(
                 this,
                 DnsVpnService::class.java
             ).apply {
-
                 action =
                     DnsVpnService.ACTION_STOP
             }
 
-        startService(intent)
+        try {
+
+            startService(intent)
+
+        } catch (_: Exception) {
+        }
+
+        updateUi()
+
+        Toast.makeText(
+            this,
+            "Protection disabled.",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun updateFilters() {
+
+        updateButton.isEnabled = false
+
+        updateButton.text =
+            "Updating..."
+
+        lifecycleScope.launch {
+
+            val result =
+                withContext(
+                    Dispatchers.IO
+                ) {
+
+                    repository.updateFilters()
+                }
+
+            if (result) {
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Filters updated successfully.",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+            } else {
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Filter update failed.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+
+            updateButton.isEnabled = true
+
+            updateButton.text =
+                "Update filters"
+
+            updateUi()
+        }
+    }
+
+    private fun resetBlockedCounter() {
+
+        preferences.resetBlockedCount()
+
+        updateUi()
+
+        Toast.makeText(
+            this,
+            "Blocked counter reset.",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun updateUi() {
@@ -159,32 +279,79 @@ class MainActivity : ComponentActivity() {
         val enabled =
             preferences.enabled.value
 
-        val enableButton =
-            findViewById<android.view.View>(
-                R.id.enableButton
+        if (enabled) {
+
+            statusText.text =
+                "PROTECTION ON"
+
+            statusText.setTextColor(
+                getColor(
+                    android.R.color.holo_green_light
+                )
             )
 
-        val disableButton =
-            findViewById<android.view.View>(
-                R.id.disableButton
+            toggleButton.text =
+                "Turn protection OFF"
+
+        } else {
+
+            statusText.text =
+                "PROTECTION OFF"
+
+            statusText.setTextColor(
+                getColor(
+                    android.R.color.holo_red_light
+                )
             )
 
-        enableButton.isEnabled =
-            !enabled
+            toggleButton.text =
+                "Turn protection ON"
+        }
 
-        disableButton.isEnabled =
-            enabled
+        blockedCountText.text =
+            preferences.blockedCount
+                .value
+                .toString()
+
+        lifecycleScope.launch {
+
+            val ruleCount =
+                withContext(
+                    Dispatchers.IO
+                ) {
+                    try {
+                        repository
+                            .getRuleCount()
+                    } catch (
+                        _: Exception
+                    ) {
+                        0
+                    }
+                }
+
+            ruleCountText.text =
+                ruleCount.toString()
+        }
     }
 
     override fun onResume() {
         super.onResume()
 
+        updateUi()
+
         /*
-         * Refresh the UI when returning from the
-         * Android VPN permission screen.
+         * Give the service/storage a moment to persist
+         * changes before refreshing the displayed values.
          */
-        if (::preferences.isInitialized) {
+        lifecycleScope.launch {
+
+            delay(150)
+
             updateUi()
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
     }
 }
