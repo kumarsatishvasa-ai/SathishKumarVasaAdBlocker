@@ -3,28 +3,36 @@ package com.sathishkumarvasa.adblocker
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
-import android.widget.Button
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 
-class MainActivity : AppCompatActivity() {
-
-    private lateinit var statusText: TextView
-    private lateinit var toggleButton: Button
-    private lateinit var blockedCountText: TextView
-    private lateinit var ruleCountText: TextView
-    private lateinit var updateButton: Button
-    private lateinit var resetButton: Button
-
-    private lateinit var preferences: AppPreferences
-    private lateinit var repository: FilterRepository
+class MainActivity : ComponentActivity() {
 
     private val vpnPermissionLauncher =
         registerForActivityResult(
@@ -32,305 +40,253 @@ class MainActivity : AppCompatActivity() {
         ) { result ->
 
             if (result.resultCode == RESULT_OK) {
-                enableProtection()
+                startAdBlocker()
             } else {
                 Toast.makeText(
                     this,
-                    "VPN permission was not granted.",
-                    Toast.LENGTH_LONG
+                    "VPN permission was not granted",
+                    Toast.LENGTH_SHORT
                 ).show()
-
-                preferences.setEnabled(false)
-                updateUi()
             }
         }
 
-    override fun onCreate(
-        savedInstanceState: Bundle?
-    ) {
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        setContentView(
-            R.layout.activity_main
-        )
-
-        initializeDependencies()
-        initializeViews()
-        initializeListeners()
-
-        updateUi()
-    }
-
-    private fun initializeDependencies() {
-
-        preferences =
-            AppPreferences(
-                applicationContext
-            )
-
-        repository =
-            FilterRepository(
-                applicationContext,
-                preferences
-            )
-    }
-
-    private fun initializeViews() {
-
-        statusText =
-            findViewById(
-                R.id.statusText
-            )
-
-        toggleButton =
-            findViewById(
-                R.id.toggleButton
-            )
-
-        blockedCountText =
-            findViewById(
-                R.id.blockedCountText
-            )
-
-        ruleCountText =
-            findViewById(
-                R.id.ruleCountText
-            )
-
-        updateButton =
-            findViewById(
-                R.id.updateButton
-            )
-
-        resetButton =
-            findViewById(
-                R.id.resetButton
-            )
-    }
-
-    private fun initializeListeners() {
-
-        toggleButton.setOnClickListener {
-
-            if (
-                preferences.enabled.value
-            ) {
-                disableProtection()
-            } else {
-                requestVpnPermission()
+        setContent {
+            MaterialTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    AdBlockerScreen()
+                }
             }
-        }
-
-        updateButton.setOnClickListener {
-            updateFilters()
-        }
-
-        resetButton.setOnClickListener {
-            resetBlockedCounter()
         }
     }
 
     private fun requestVpnPermission() {
+        val intent = VpnService.prepare(this)
 
-        val prepareIntent =
-            VpnService.prepare(this)
-
-        if (prepareIntent == null) {
-
-            enableProtection()
-
+        if (intent != null) {
+            vpnPermissionLauncher.launch(intent)
         } else {
-
-            vpnPermissionLauncher.launch(
-                prepareIntent
-            )
+            startAdBlocker()
         }
     }
 
-    private fun enableProtection() {
-
-        preferences.setEnabled(true)
-
-        val intent =
-            Intent(
-                this,
-                DnsVpnService::class.java
-            )
-
+    private fun startAdBlocker() {
         try {
+            val intent = Intent(this, DnsVpnService::class.java).apply {
+                action = DnsVpnService.ACTION_START
+            }
 
-            ContextCompat.startForegroundService(
-                this,
-                intent
-            )
-
-            updateUi()
+            startService(intent)
 
             Toast.makeText(
                 this,
-                "Protection enabled.",
+                "Ad blocker started",
                 Toast.LENGTH_SHORT
             ).show()
 
-        } catch (error: Exception) {
-
-            preferences.setEnabled(false)
-
-            updateUi()
-
+        } catch (e: Exception) {
             Toast.makeText(
                 this,
-                "Unable to start protection: ${
-                    error.message ?: "Unknown error"
-                }",
+                "Failed to start ad blocker: ${e.message}",
                 Toast.LENGTH_LONG
             ).show()
         }
     }
 
-    private fun disableProtection() {
-
-        preferences.setEnabled(false)
-
-        val intent =
-            Intent(
-                this,
-                DnsVpnService::class.java
-            ).apply {
-                action =
-                    DnsVpnService.ACTION_STOP
-            }
-
+    private fun stopAdBlocker() {
         try {
+            val intent = Intent(this, DnsVpnService::class.java).apply {
+                action = DnsVpnService.ACTION_STOP
+            }
 
             startService(intent)
 
-        } catch (_: Exception) {
-            /*
-             * The service may already be stopped.
-             */
+            Toast.makeText(
+                this,
+                "Ad blocker stopped",
+                Toast.LENGTH_SHORT
+            ).show()
+
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "Failed to stop ad blocker: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
         }
-
-        updateUi()
-
-        Toast.makeText(
-            this,
-            "Protection disabled.",
-            Toast.LENGTH_SHORT
-        ).show()
     }
 
-    private fun updateFilters() {
+    @androidx.compose.runtime.Composable
+    private fun AdBlockerScreen() {
 
-        updateButton.isEnabled = false
-        updateButton.text = "Updating..."
+        var enabled by remember {
+            mutableStateOf(false)
+        }
 
-        lifecycleScope.launch {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+            verticalArrangement = Arrangement.Top,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
 
-            val result =
-                withContext(
-                    Dispatchers.IO
+            Spacer(
+                modifier = Modifier.height(24.dp)
+            )
+
+            Text(
+                text = "DNS Ad Blocker",
+                style = MaterialTheme.typography.headlineMedium
+            )
+
+            Spacer(
+                modifier = Modifier.height(8.dp)
+            )
+
+            Text(
+                text = "Block advertisements and unwanted domains using a local VPN.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Spacer(
+                modifier = Modifier.height(32.dp)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+
+                Column(
+                    modifier = Modifier.padding(20.dp)
                 ) {
-                    try {
-                        repository.updateFilters(
-                            force = true
-                        )
-                    } catch (error: Exception) {
 
-                        FilterUpdateResult(
-                            success = false,
-                            ruleCount =
-                                preferences.ruleCount.value,
-                            message =
-                                error.message
-                                    ?: "Filter update failed."
+                    Text(
+                        text = if (enabled) {
+                            "Protection enabled"
+                        } else {
+                            "Protection disabled"
+                        },
+                        style = MaterialTheme.typography.titleLarge
+                    )
+
+                    Spacer(
+                        modifier = Modifier.height(8.dp)
+                    )
+
+                    Text(
+                        text = if (enabled) {
+                            "Your DNS traffic is being filtered."
+                        } else {
+                            "The ad blocker is currently stopped."
+                        },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    Spacer(
+                        modifier = Modifier.height(20.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+
+                        Text(
+                            text = "Ad blocking"
+                        )
+
+                        Switch(
+                            checked = enabled,
+                            onCheckedChange = { checked ->
+
+                                if (checked) {
+                                    requestVpnPermission()
+                                } else {
+                                    stopAdBlocker()
+                                }
+
+                                enabled = checked
+                            }
                         )
                     }
                 }
-
-            updateButton.isEnabled = true
-            updateButton.text = "Update filters"
-
-            if (result.success) {
-
-                Toast.makeText(
-                    this@MainActivity,
-                    result.message,
-                    Toast.LENGTH_SHORT
-                ).show()
-
-            } else {
-
-                Toast.makeText(
-                    this@MainActivity,
-                    result.message,
-                    Toast.LENGTH_LONG
-                ).show()
             }
 
-            updateUi()
-        }
-    }
-
-    private fun resetBlockedCounter() {
-
-        preferences.resetBlockedCount()
-
-        updateUi()
-
-        Toast.makeText(
-            this,
-            "Blocked counter reset.",
-            Toast.LENGTH_SHORT
-        ).show()
-    }
-
-    private fun updateUi() {
-
-        val enabled =
-            preferences.enabled.value
-
-        if (enabled) {
-
-            statusText.text =
-                "PROTECTION ON"
-
-            statusText.setTextColor(
-                getColor(
-                    android.R.color.holo_green_light
-                )
+            Spacer(
+                modifier = Modifier.height(24.dp)
             )
 
-            toggleButton.text =
-                "Turn protection OFF"
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    requestVpnPermission()
+                    enabled = true
+                }
+            ) {
+                Text("Start Ad Blocker")
+            }
 
-        } else {
-
-            statusText.text =
-                "PROTECTION OFF"
-
-            statusText.setTextColor(
-                getColor(
-                    android.R.color.holo_red_light
-                )
+            Spacer(
+                modifier = Modifier.height(12.dp)
             )
 
-            toggleButton.text =
-                "Turn protection ON"
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    stopAdBlocker()
+                    enabled = false
+                }
+            ) {
+                Text("Stop Ad Blocker")
+            }
+
+            Spacer(
+                modifier = Modifier.height(32.dp)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+
+                Column(
+                    modifier = Modifier.padding(20.dp)
+                ) {
+
+                    Text(
+                        text = "How it works",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+
+                    Spacer(
+                        modifier = Modifier.height(8.dp)
+                    )
+
+                    Text(
+                        text = "The application creates a local VPN connection and filters DNS requests. No root access is required."
+                    )
+                }
+            }
+
+            Spacer(
+                modifier = Modifier.height(24.dp)
+            )
+
+            Text(
+                text = "Version 1.0.0",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
-
-        blockedCountText.text =
-            preferences.blockedCount.value
-                .toString()
-
-        ruleCountText.text =
-            preferences.ruleCount.value
-                .toString()
     }
 
     override fun onResume() {
         super.onResume()
-
-        updateUi()
     }
 }
