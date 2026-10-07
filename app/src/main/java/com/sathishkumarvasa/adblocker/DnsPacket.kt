@@ -1,366 +1,418 @@
 package com.sathishkumarvasa.adblocker
 
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-
-/**
- * Minimal DNS packet parser/builder.
- *
- * This implementation handles standard DNS queries and
- * creates simple NXDOMAIN / empty-answer responses for
- * blocked domains.
- */
 object DnsPacket {
 
-    data class Query(
+    data class DnsQuery(
         val transactionId: Int,
         val flags: Int,
-        val questionEnd: Int,
         val hostname: String,
-        val questionBytes: ByteArray
+        val questionType: Int,
+        val questionClass: Int
     )
 
     fun parseQuery(
-        packet: ByteArray,
-        length: Int = packet.size
-    ): Query? {
+        packet: ByteArray
+    ): DnsQuery? {
 
-        if (length < 12) {
+        /*
+         * DNS header:
+         *
+         * 0-1   transaction ID
+         * 2-3   flags
+         * 4-5   question count
+         * 6-7   answer count
+         * 8-9   authority count
+         * 10-11 additional count
+         */
+        if (
+            packet.size < DNS_HEADER_LENGTH
+        ) {
             return null
         }
-
-        val data =
-            packet.copyOf(length)
-
-        val buffer =
-            ByteBuffer
-                .wrap(data)
-                .order(
-                    ByteOrder.BIG_ENDIAN
-                )
 
         val transactionId =
-            buffer.short
-                .toInt() and 0xFFFF
-
-        val flags =
-            buffer.short
-                .toInt() and 0xFFFF
-
-        val questionCount =
-            buffer.short
-                .toInt() and 0xFFFF
-
-        val answerCount =
-            buffer.short
-                .toInt() and 0xFFFF
-
-        val authorityCount =
-            buffer.short
-                .toInt() and 0xFFFF
-
-        val additionalCount =
-            buffer.short
-                .toInt() and 0xFFFF
-
-        /*
-         * We only process standard one-question queries.
-         */
-        if (
-            questionCount != 1
-        ) {
-            return null
-        }
-
-        var position =
-            12
-
-        val labels =
-            ArrayList<String>()
-
-        while (
-            position < length
-        ) {
-
-            val size =
-                data[position]
-                    .toInt() and 0xFF
-
-            position++
-
-            if (size == 0) {
-                break
-            }
-
-            /*
-             * Compression pointer.
-             *
-             * Queries normally do not use one for QNAME,
-             * so we reject it here.
-             */
-            if (
-                size and 0xC0 == 0xC0
-            ) {
-                return null
-            }
-
-            if (
-                size > 63 ||
-                position + size > length
-            ) {
-                return null
-            }
-
-            labels.add(
-                String(
-                    data,
-                    position,
-                    size,
-                    Charsets.US_ASCII
-                )
+            readUnsignedShort(
+                packet,
+                0
             )
 
-            position += size
-        }
+        val flags =
+            readUnsignedShort(
+                packet,
+                2
+            )
 
         /*
-         * QNAME terminator must be present.
+         * QR bit:
+         *
+         * 0 = query
+         * 1 = response
          */
         if (
-            position >= length
+            flags and FLAG_RESPONSE != 0
         ) {
             return null
         }
+
+        val questionCount =
+            readUnsignedShort(
+                packet,
+                4
+            )
+
+        if (
+            questionCount <= 0
+        ) {
+            return null
+        }
+
+        /*
+         * We only inspect the first question.
+         */
+        var offset =
+            DNS_HEADER_LENGTH
+
+        val hostnameResult =
+            readHostname(
+                packet,
+                offset
+            )
+                ?: return null
+
+        val hostname =
+            hostnameResult.first
+
+        offset =
+            hostnameResult.second
 
         /*
          * QTYPE + QCLASS.
          */
         if (
-            position + 4 > length
+            offset + 4 > packet.size
         ) {
             return null
         }
 
-        position += 4
+        val questionType =
+            readUnsignedShort(
+                packet,
+                offset
+            )
 
-        val hostname =
-            labels.joinToString(".")
-                .lowercase()
+        val questionClass =
+            readUnsignedShort(
+                packet,
+                offset + 2
+            )
 
-        if (hostname.isEmpty()) {
+        /*
+         * Only standard Internet DNS questions are
+         * currently handled.
+         */
+        if (
+            questionClass != CLASS_IN
+        ) {
             return null
         }
 
-        val questionBytes =
-            data.copyOfRange(
-                12,
-                position
-            )
+        if (
+            hostname.isEmpty()
+        ) {
+            return null
+        }
 
-        return Query(
+        return DnsQuery(
             transactionId =
                 transactionId,
 
             flags =
                 flags,
 
-            questionEnd =
-                position,
-
             hostname =
                 hostname,
 
-            questionBytes =
-                questionBytes
+            questionType =
+                questionType,
+
+            questionClass =
+                questionClass
         )
     }
 
-    /**
-     * Creates a DNS response containing no answers.
-     *
-     * For a blocked hostname we return NXDOMAIN.
-     */
+    private fun readHostname(
+        packet: ByteArray,
+        startOffset: Int
+    ): Pair<String, Int>? {
+
+        var offset =
+            startOffset
+
+        val labels =
+            ArrayList<String>()
+
+        /*
+         * DNS names are limited to 255 bytes.
+         */
+        var totalLength =
+            0
+
+        while (true) {
+
+            if (
+                offset >= packet.size
+            ) {
+                return null
+            }
+
+            val length =
+                packet[offset].toInt() and 0xFF
+
+            offset++
+
+            /*
+             * Zero marks the end of the QNAME.
+             */
+            if (
+                length == 0
+            ) {
+                break
+            }
+
+            /*
+             * Compression pointers should not appear
+             * in a normal DNS question. Reject them to
+             * avoid pointer-loop complexity.
+             */
+            if (
+                length and 0xC0 == 0xC0
+            ) {
+                return null
+            }
+
+            /*
+             * DNS labels are max 63 bytes.
+             */
+            if (
+                length > 63
+            ) {
+                return null
+            }
+
+            if (
+                offset + length >
+                packet.size
+            ) {
+                return null
+            }
+
+            totalLength +=
+                length + 1
+
+            if (
+                totalLength > 255
+            ) {
+                return null
+            }
+
+            val labelBytes =
+                packet.copyOfRange(
+                    offset,
+                    offset + length
+                )
+
+            val label =
+                try {
+
+                    labelBytes
+                        .toString(
+                            Charsets.US_ASCII
+                        )
+
+                } catch (_: Exception) {
+
+                    return null
+                }
+
+            if (
+                label.isEmpty()
+            ) {
+                return null
+            }
+
+            /*
+             * DNS hostnames used for filtering should
+             * contain printable ASCII characters.
+             */
+            if (
+                label.any {
+                    it.code < 33 ||
+                        it.code > 126
+                }
+            ) {
+                return null
+            }
+
+            labels.add(
+                label
+            )
+
+            offset +=
+                length
+        }
+
+        if (
+            labels.isEmpty()
+        ) {
+            return null
+        }
+
+        val hostname =
+            labels.joinToString(
+                "."
+            )
+                .lowercase()
+
+        return hostname to offset
+    }
+
     fun buildBlockedResponse(
-        query: Query
+        query: DnsQuery
     ): ByteArray {
 
-        val buffer =
-            ByteBuffer
-                .allocate(
-                    12 +
-                        query.questionBytes.size
-                )
-                .order(
-                    ByteOrder.BIG_ENDIAN
-                )
+        /*
+         * Return an NXDOMAIN response.
+         *
+         * This tells the requesting application that
+         * the domain does not exist.
+         */
+        val response =
+            ByteArray(
+                DNS_HEADER_LENGTH
+            )
 
-        buffer.putShort(
+        /*
+         * Transaction ID.
+         */
+        writeUnsignedShort(
+            response,
+            0,
             query.transactionId
-                .toShort()
         )
 
         /*
-         * QR = response
-         * RD = recursion desired copied from query
-         * RA = recursion available
-         * RCODE = NXDOMAIN (3)
+         * Flags:
+         *
+         * QR       = 1 response
+         * AA       = 1 authoritative
+         * RCODE    = 3 NXDOMAIN
+         *
+         * 0x8403
          */
-        var flags =
-            0x8000
+        val flags =
+            FLAG_RESPONSE or
+                FLAG_AUTHORITATIVE or
+                RCODE_NXDOMAIN
 
-        flags =
-            flags or
-                (query.flags and 0x0100)
-
-        flags =
-            flags or 0x0080
-
-        flags =
-            flags or 0x0003
-
-        buffer.putShort(
-            flags.toShort()
+        writeUnsignedShort(
+            response,
+            2,
+            flags
         )
 
         /*
-         * One question.
+         * QDCOUNT = 1
          */
-        buffer.putShort(
-            1.toShort()
+        writeUnsignedShort(
+            response,
+            4,
+            1
         )
 
         /*
          * No answers.
          */
-        buffer.putShort(
-            0.toShort()
+        writeUnsignedShort(
+            response,
+            6,
+            0
         )
 
         /*
          * No authority records.
          */
-        buffer.putShort(
-            0.toShort()
+        writeUnsignedShort(
+            response,
+            8,
+            0
         )
 
         /*
          * No additional records.
          */
-        buffer.putShort(
-            0.toShort()
+        writeUnsignedShort(
+            response,
+            10,
+            0
         )
 
-        buffer.put(
-            query.questionBytes
-        )
-
-        return buffer.array()
+        return response
     }
 
-    /**
-     * Builds a simple A record response.
-     *
-     * This is useful for returning a local address for
-     * allowed DNS queries when the upstream response is
-     * already known.
-     */
-    fun buildAResponse(
-        query: Query,
-        address: ByteArray,
-        ttl: Int = 60
-    ): ByteArray {
+    private fun readUnsignedShort(
+        data: ByteArray,
+        offset: Int
+    ): Int {
 
-        require(
-            address.size == 4
+        if (
+            offset < 0 ||
+            offset + 1 >= data.size
         ) {
-            "IPv4 address must contain 4 bytes."
+            return 0
         }
 
-        val buffer =
-            ByteBuffer
-                .allocate(
-                    12 +
-                        query.questionBytes.size +
-                        16
-                )
-                .order(
-                    ByteOrder.BIG_ENDIAN
-                )
-
-        buffer.putShort(
-            query.transactionId
-                .toShort()
-        )
-
-        var flags =
-            0x8000
-
-        flags =
-            flags or
-                (query.flags and 0x0100)
-
-        flags =
-            flags or 0x0080
-
-        buffer.putShort(
-            flags.toShort()
-        )
-
-        buffer.putShort(
-            1.toShort()
-        )
-
-        buffer.putShort(
-            1.toShort()
-        )
-
-        buffer.putShort(
-            0.toShort()
-        )
-
-        buffer.putShort(
-            0.toShort()
-        )
-
-        buffer.put(
-            query.questionBytes
-        )
-
-        /*
-         * NAME = pointer to QNAME at offset 12.
-         */
-        buffer.putShort(
-            0xC00C.toShort()
-        )
-
-        /*
-         * TYPE = A.
-         */
-        buffer.putShort(
-            1.toShort()
-        )
-
-        /*
-         * CLASS = IN.
-         */
-        buffer.putShort(
-            1.toShort()
-        )
-
-        buffer.putInt(
-            ttl
-        )
-
-        /*
-         * IPv4 address length.
-         */
-        buffer.putShort(
-            4.toShort()
-        )
-
-        buffer.put(address)
-
-        return buffer.array()
+        return (
+            ((data[offset].toInt() and 0xFF) shl 8) or
+                (data[offset + 1].toInt() and 0xFF)
+            )
     }
-}
 
+    private fun writeUnsignedShort(
+        data: ByteArray,
+        offset: Int,
+        value: Int
+    ) {
+
+        if (
+            offset < 0 ||
+            offset + 1 >= data.size
+        ) {
+            return
+        }
+
+        data[offset] =
+            (
+                (value ushr 8) and 0xFF
+                ).toByte()
+
+        data[offset + 1] =
+            (
+                value and 0xFF
+                ).toByte()
+    }
+
+    private const val DNS_HEADER_LENGTH =
+        12
+
+    private const val CLASS_IN =
+        1
+
+    private const val FLAG_RESPONSE =
+        0x8000
+
+    private const val FLAG_AUTHORITATIVE =
+        0x0400
+
+    private const val RCODE_NXDOMAIN =
+        3
+}
