@@ -1,6 +1,6 @@
 name: Android Build
 
-on:
+'on':
 push:
 branches:
 - main
@@ -35,7 +35,7 @@ steps:
   - name: Accept Android SDK licenses
     run: yes | sdkmanager --licenses || true
 
-  - name: Install Android SDK
+  - name: Install Android SDK 37
     run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
 
   - name: Make Gradle executable
