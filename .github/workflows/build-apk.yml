@@ -1,32 +1,42 @@
 name: Build APK
 
-on: [push, workflow_dispatch]
+on:
+push:
+workflow_dispatch:
 
 jobs:
 build:
 runs-on: ubuntu-latest
-steps:
-- uses: actions/checkout@v4
 
-  - uses: actions/setup-java@v4
+steps:
+  - name: Checkout
+    uses: actions/checkout@v4
+
+  - name: Java 17
+    uses: actions/setup-java@v4
     with:
       distribution: temurin
       java-version: '17'
 
-  - uses: android-actions/setup-android@v3
+  - name: Android SDK
+    uses: android-actions/setup-android@v3
 
-  - run: |
-      sdkmanager "platform-tools"
-      sdkmanager "platforms;android-37"
-      yes | sdkmanager --licenses
+  - name: Install SDK
+    run: sdkmanager "platform-tools" "platforms;android-37"
 
-  - uses: gradle/actions/setup-gradle@v4
+  - name: Accept licenses
+    run: yes | sdkmanager --licenses
+
+  - name: Gradle 9.6
+    uses: gradle/actions/setup-gradle@v4
     with:
       gradle-version: '9.6'
 
-  - run: gradle assembleDebug
+  - name: Build
+    run: gradle assembleDebug
 
-  - uses: actions/upload-artifact@v4
+  - name: Upload APK
+    uses: actions/upload-artifact@v4
     with:
       name: app-debug
       path: app/build/outputs/apk/debug/*.apk
