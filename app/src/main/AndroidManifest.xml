@@ -3,12 +3,15 @@
 <manifest
     xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Network access for the upstream DNS resolver. -->
     <uses-permission
         android:name="android.permission.INTERNET" />
 
+    <!-- Required for the foreground VPN service. -->
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <!-- Required when using the specialUse foreground-service type. -->
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
@@ -34,6 +37,12 @@
 
         </activity>
 
+        <!--
+             DNS filtering VPN service.
+
+             BIND_VPN_SERVICE is required by Android for
+             applications that implement VpnService.
+        -->
         <service
             android:name=".DnsVpnService"
             android:exported="false"
@@ -47,10 +56,12 @@
 
             </intent-filter>
 
+            <!-- Allow Android Always-on VPN configuration. -->
             <meta-data
                 android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
                 android:value="true" />
 
+            <!-- Explanation required for specialUse FGS. -->
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="dns_filtering" />
@@ -60,4 +71,3 @@
     </application>
 
 </manifest>
-
