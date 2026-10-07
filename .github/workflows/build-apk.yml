@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -23,21 +23,21 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept SDK licenses
+      - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      - name: Install Android SDK
+      - name: Install Android SDK packages
         run: |
           sdkmanager "platform-tools"
           sdkmanager "platforms;android-37"
           sdkmanager "build-tools;35.0.0"
 
-      - name: Install Gradle
+      - name: Set up Gradle 9.6
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6'
 
-      - name: Build APK
+      - name: Build Debug APK
         run: gradle assembleDebug
 
       - name: Upload APK
