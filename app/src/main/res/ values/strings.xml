@@ -1,1 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<resources>
+
+    <string name="app_name">
+        SATHISH KUMAR VASA Ad Blocker
+    </string>
+
+    <string name="app_description">
+        General-purpose advertising and tracker blocker with DNS filtering.
+    </string>
+
+    <string name="vpn_notification_title">
+        SATHISH KUMAR VASA Ad Blocker
+    </string>
+
+    <string name="vpn_notification_text">
+        Ad and tracker protection is active
+    </string>
+
+</resources>
 
