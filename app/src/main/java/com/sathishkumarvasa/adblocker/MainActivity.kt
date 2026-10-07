@@ -8,9 +8,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -34,14 +34,14 @@ class MainActivity : AppCompatActivity() {
             if (result.resultCode == RESULT_OK) {
                 enableProtection()
             } else {
-                preferences.setEnabled(false)
-                updateUi()
-
                 Toast.makeText(
                     this,
-                    "VPN permission is required for protection.",
+                    "VPN permission was not granted.",
                     Toast.LENGTH_LONG
                 ).show()
+
+                preferences.setEnabled(false)
+                updateUi()
             }
         }
 
@@ -132,17 +132,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestVpnPermission() {
 
-        val intent =
+        val prepareIntent =
             VpnService.prepare(this)
 
-        if (intent == null) {
+        if (prepareIntent == null) {
 
             enableProtection()
 
         } else {
 
             vpnPermissionLauncher.launch(
-                intent
+                prepareIntent
             )
         }
     }
@@ -159,11 +159,10 @@ class MainActivity : AppCompatActivity() {
 
         try {
 
-            androidx.core.content.ContextCompat
-                .startForegroundService(
-                    this,
-                    intent
-                )
+            ContextCompat.startForegroundService(
+                this,
+                intent
+            )
 
             updateUi()
 
@@ -181,7 +180,7 @@ class MainActivity : AppCompatActivity() {
 
             Toast.makeText(
                 this,
-                "Unable to start VPN: ${
+                "Unable to start protection: ${
                     error.message ?: "Unknown error"
                 }",
                 Toast.LENGTH_LONG
@@ -207,6 +206,9 @@ class MainActivity : AppCompatActivity() {
             startService(intent)
 
         } catch (_: Exception) {
+            /*
+             * The service may already be stopped.
+             */
         }
 
         updateUi()
@@ -221,9 +223,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateFilters() {
 
         updateButton.isEnabled = false
-
-        updateButton.text =
-            "Updating..."
+        updateButton.text = "Updating..."
 
         lifecycleScope.launch {
 
@@ -231,15 +231,31 @@ class MainActivity : AppCompatActivity() {
                 withContext(
                     Dispatchers.IO
                 ) {
+                    try {
+                        repository.updateFilters(
+                            force = true
+                        )
+                    } catch (error: Exception) {
 
-                    repository.updateFilters()
+                        FilterUpdateResult(
+                            success = false,
+                            ruleCount =
+                                preferences.ruleCount.value,
+                            message =
+                                error.message
+                                    ?: "Filter update failed."
+                        )
+                    }
                 }
 
-            if (result) {
+            updateButton.isEnabled = true
+            updateButton.text = "Update filters"
+
+            if (result.success) {
 
                 Toast.makeText(
                     this@MainActivity,
-                    "Filters updated successfully.",
+                    result.message,
                     Toast.LENGTH_SHORT
                 ).show()
 
@@ -247,15 +263,10 @@ class MainActivity : AppCompatActivity() {
 
                 Toast.makeText(
                     this@MainActivity,
-                    "Filter update failed.",
+                    result.message,
                     Toast.LENGTH_LONG
                 ).show()
             }
-
-            updateButton.isEnabled = true
-
-            updateButton.text =
-                "Update filters"
 
             updateUi()
         }
@@ -309,49 +320,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         blockedCountText.text =
-            preferences.blockedCount
-                .value
+            preferences.blockedCount.value
                 .toString()
 
-        lifecycleScope.launch {
-
-            val ruleCount =
-                withContext(
-                    Dispatchers.IO
-                ) {
-                    try {
-                        repository
-                            .getRuleCount()
-                    } catch (
-                        _: Exception
-                    ) {
-                        0
-                    }
-                }
-
-            ruleCountText.text =
-                ruleCount.toString()
-        }
+        ruleCountText.text =
+            preferences.ruleCount.value
+                .toString()
     }
 
     override fun onResume() {
         super.onResume()
 
         updateUi()
-
-        /*
-         * Give the service/storage a moment to persist
-         * changes before refreshing the displayed values.
-         */
-        lifecycleScope.launch {
-
-            delay(150)
-
-            updateUi()
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
     }
 }
