@@ -1,7 +1,5 @@
 name: Build APK
-
-on: push
-
+"on": push
 jobs:
 build:
 runs-on: ubuntu-latest
@@ -10,13 +8,13 @@ steps:
 - uses: actions/setup-java@v4
 with:
 distribution: temurin
-java-version: '17'
+java-version: "17"
 - uses: android-actions/setup-android@v3
 - run: sdkmanager "platform-tools" "platforms;android-37"
 - run: yes | sdkmanager --licenses
 - uses: gradle/actions/setup-gradle@v4
 with:
-gradle-version: '9.6'
+gradle-version: "9.6"
 - run: gradle assembleDebug
 - uses: actions/upload-artifact@v4
 with:
