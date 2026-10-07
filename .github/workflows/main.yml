@@ -1,19 +1,21 @@
-name: Build Android APK
+name: Android Build
 
 on:
 push:
 branches:
 - main
 - master
+
 pull_request:
 branches:
 - main
 - master
+
 workflow_dispatch:
 
 jobs:
 build:
-name: Build Debug APK
+name: Build Android APK
 runs-on: ubuntu-latest
 
 steps:
@@ -33,10 +35,8 @@ steps:
   - name: Accept Android SDK licenses
     run: yes | sdkmanager --licenses || true
 
-  - name: Install Android SDK 37
-    run: |
-      sdkmanager "platforms;android-37"
-      sdkmanager "build-tools;37.0.0"
+  - name: Install Android SDK
+    run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
 
   - name: Make Gradle executable
     run: chmod +x ./gradlew
@@ -47,6 +47,6 @@ steps:
   - name: Upload Debug APK
     uses: actions/upload-artifact@v4
     with:
-      name: SathishKumarVasa-AdBlocker-debug
+      name: adblocker-debug-apk
       path: app/build/outputs/apk/debug/*.apk
       if-no-files-found: error
