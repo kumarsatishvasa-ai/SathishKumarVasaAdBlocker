@@ -18,7 +18,7 @@ class AppPreferences(
         MutableStateFlow(
             preferences.getBoolean(
                 KEY_ENABLED,
-                true
+                false
             )
         )
 
