@@ -1,356 +1,142 @@
 package com.sathishkumarvasa.adblocker
 
-import java.net.InetAddress
-import java.util.concurrent.ConcurrentHashMap
-
-/**
- * DNS-level filtering engine.
- *
- * It decides whether a hostname should be blocked.
- *
- * Important:
- * A DNS filter sees hostnames, not complete HTTPS URLs.
- * Therefore rules depending on URL paths are reduced to
- * their hostname/domain component where possible.
- */
 class DnsFilter(
     private val preferences: AppPreferences
 ) {
 
-    private val rules =
-        ArrayList<FilterRule>()
+    @Volatile
+    private var rules: List<FilterRule> =
+        emptyList()
 
-    private val blockedDomains =
-        ConcurrentHashMap.newKeySet<String>()
-
-    private val allowlist =
-        ConcurrentHashMap.newKeySet<String>()
-
-    private val cache =
-        ConcurrentHashMap<String, Boolean>()
-
-    @Synchronized
-    fun replaceRules(
-        newRules: List<FilterRule>
-    ) {
-
-        rules.clear()
-
-        rules.addAll(
-            newRules
-        )
-
-        rebuildDomainIndex()
-
-        clearCache()
-    }
-
-    @Synchronized
     fun loadRules(
         newRules: List<FilterRule>
     ) {
-        replaceRules(newRules)
-    }
 
-    @Synchronized
-    fun clearRules() {
-
-        rules.clear()
-
-        blockedDomains.clear()
-
-        clearCache()
-    }
-
-    fun ruleCount(): Int {
-        return rules.size
-    }
-
-    fun isBlocked(
-        hostname: String
-    ): Boolean {
-
-        if (
-            !preferences.enabled.value
-        ) {
-            return false
-        }
-
-        val host =
-            normalizeHostname(
-                hostname
-            )
-
-        if (host.isEmpty()) {
-            return false
-        }
-
-        /*
-         * Never block localhost/private infrastructure
-         * by accident.
-         */
-        if (
-            isLocalHostname(host)
-        ) {
-            return false
-        }
-
-        /*
-         * User allowlist has priority.
-         */
-        if (
-            preferences.isAllowlisted(host)
-        ) {
-            return false
-        }
-
-        /*
-         * Fast cache.
-         */
-        cache[host]?.let {
-            return it
-        }
-
-        /*
-         * Fast exact/domain lookup.
-         */
-        if (
-            matchesBlockedDomain(host)
-        ) {
-
-            cache[host] = true
-
-            return true
-        }
-
-        /*
-         * Check parsed rules.
-         */
-        val result =
-            rules.any { rule ->
-
-                matchesRule(
-                    rule,
-                    host
-                )
-            }
-
-        cache[host] =
-            result
-
-        return result
-    }
-
-    /**
-     * Returns a DNS response address that can be used
-     * for blocked domains.
-     *
-     * We use 0.0.0.0 for IPv4 and :: for IPv6.
-     */
-    fun blockedIpv4(): ByteArray {
-        return byteArrayOf(
-            0,
-            0,
-            0,
-            0
-        )
-    }
-
-    fun blockedIpv6(): ByteArray {
-        return ByteArray(16)
+        rules =
+            newRules
+                .filter {
+                    it.pattern.isNotBlank()
+                }
+                .sortedByDescending {
+                    it.priority
+                }
     }
 
     fun normalizeHostname(
         hostname: String
     ): String {
 
-        var host =
+        var value =
             hostname
                 .trim()
                 .lowercase()
 
         /*
-         * Remove trailing DNS dot.
+         * DNS names normally arrive without a trailing
+         * dot, but accept and normalize one if present.
          */
-        host =
-            host.trimEnd('.')
+        value =
+            value.trim('.')
 
         /*
-         * Remove brackets around IPv6.
+         * Remove accidental whitespace.
          */
         if (
-            host.startsWith("[") &&
-            host.endsWith("]")
-        ) {
-            host =
-                host.substring(
-                    1,
-                    host.length - 1
-                )
-        }
-
-        /*
-         * A hostname should never contain URL
-         * path/query components.
-         */
-        host =
-            host.substringBefore('/')
-
-        host =
-            host.substringBefore('?')
-
-        host =
-            host.substringBefore('#')
-
-        return host
-    }
-
-    private fun rebuildDomainIndex() {
-
-        blockedDomains.clear()
-
-        for (
-            rule in rules
-        ) {
-
-            val domain =
-                extractBlockingDomain(
-                    rule.pattern
-                )
-
-            if (
-                domain.isNotEmpty()
-            ) {
-                blockedDomains.add(
-                    domain
-                )
+            value.any {
+                it.isWhitespace()
             }
-        }
-    }
-
-    private fun extractBlockingDomain(
-        pattern: String
-    ): String {
-
-        var value =
-            pattern.trim().lowercase()
-
-        /*
-         * ABP domain anchor:
-         *
-         * ||example.com^
-         */
-        if (
-            value.startsWith("||")
         ) {
-
-            value =
-                value.substring(2)
-
-            /*
-             * Stop at ABP separator.
-             */
-            value =
-                value.substringBefore('^')
-
-            /*
-             * Stop at URL path.
-             */
-            value =
-                value.substringBefore('/')
-
-            /*
-             * Stop at query.
-             */
-            value =
-                value.substringBefore('?')
-
-            /*
-             * If there are wildcards in the remaining
-             * value, exact domain indexing isn't safe.
-             */
-            if (
-                value.contains("*") ||
-                value.contains("|")
-            ) {
-                return ""
-            }
-
-            /*
-             * Remove a leading wildcard.
-             */
-            value =
-                value.trim('*')
-
-            if (
-                isValidDomain(value)
-            ) {
-                return value
-            }
-
             return ""
         }
 
         /*
-         * Exact hostname style rules:
-         *
-         * example.com
+         * DNS hostnames should not contain URL
+         * components.
          */
         if (
-            !value.contains("/") &&
-            !value.contains("*") &&
-            !value.contains("^") &&
-            isValidDomain(value)
+            value.contains("/") ||
+            value.contains("\\") ||
+            value.contains(":") ||
+            value.contains("?") ||
+            value.contains("#")
         ) {
-            return value
+            return ""
         }
 
-        return ""
+        return value
     }
 
-    private fun matchesBlockedDomain(
-        hostname: String
+    fun isBlocked(
+        hostname: String,
+        resourceType: ResourceType =
+            ResourceType.OTHER
     ): Boolean {
 
-        /*
-         * Check the hostname itself.
-         */
-        if (
-            blockedDomains.contains(
+        val normalized =
+            normalizeHostname(
                 hostname
             )
+
+        if (
+            normalized.isEmpty()
         ) {
-            return true
+            return false
         }
 
         /*
-         * Check parent domains.
-         *
-         * Example:
-         *
-         * cdn.ads.example.com
-         *
-         * checks:
-         *
-         * cdn.ads.example.com
-         * ads.example.com
-         * example.com
+         * User allowlist always wins.
          */
-        var current =
-            hostname
+        if (
+            preferences.isAllowlisted(
+                normalized
+            )
+        ) {
+            return false
+        }
 
-        while (
-            current.contains('.')
+        val currentRules =
+            rules
+
+        if (
+            currentRules.isEmpty()
+        ) {
+            return false
+        }
+
+        /*
+         * A DNS request does not expose the exact
+         * browser resource type. OTHER is therefore
+         * used as the generic DNS resource type.
+         *
+         * Rules that explicitly contain OTHER are
+         * checked normally. Rules containing all
+         * resource types also match.
+         */
+        for (
+            rule in currentRules
         ) {
 
-            current =
-                current.substringAfter(
-                    '.'
+            if (
+                !rule.appliesToDomain(
+                    normalized
                 )
+            ) {
+                continue
+            }
 
             if (
-                blockedDomains.contains(
-                    current
+                !resourceTypeMatches(
+                    rule,
+                    resourceType
+                )
+            ) {
+                continue
+            }
+
+            if (
+                matchesPattern(
+                    normalized,
+                    rule.normalizedPattern()
                 )
             ) {
                 return true
@@ -360,235 +146,72 @@ class DnsFilter(
         return false
     }
 
-    private fun matchesRule(
+    private fun resourceTypeMatches(
         rule: FilterRule,
-        hostname: String
+        resourceType: ResourceType
     ): Boolean {
 
         /*
-         * DNS has no resource-type information.
+         * DNS filtering has no HTTP resource metadata.
          *
-         * If the rule is explicitly restricted to a
-         * browser resource type, we cannot know that
-         * information here.
+         * Treat a rule containing OTHER as applicable.
          *
-         * For domain-level protection we therefore
-         * evaluate the rule if it has at least one
-         * supported network resource type.
+         * Rules containing the complete resource set are
+         * also applicable.
          */
         if (
-            rule.resourceTypes.isEmpty()
+            rule.resourceTypes.contains(
+                ResourceType.OTHER
+            )
         ) {
-            return false
+            return true
         }
 
         if (
-            !rule.appliesToDomain(hostname)
+            rule.resourceTypes.contains(
+                resourceType
+            )
         ) {
-            return false
+            return true
         }
 
-        if (
-            matchesDomainType(
-                rule,
-                hostname
-            ).not()
-        ) {
-            /*
-             * DNS alone cannot reliably determine
-             * first-party/third-party relationship.
-             *
-             * DomainType rules are therefore treated
-             * conservatively here.
-             */
-            return false
-        }
-
-        return matchesPattern(
-            rule.pattern,
-            hostname
+        /*
+         * Most domain-only EasyList rules have all
+         * resource types. This fallback keeps those rules
+         * effective for DNS filtering.
+         */
+        return rule.resourceTypes.containsAll(
+            ResourceType.entries.toSet()
         )
     }
 
-    private fun matchesDomainType(
-        rule: FilterRule,
-        hostname: String
-    ): Boolean {
-
-        return when (
-            rule.domainType
-        ) {
-
-            DomainType.ANY ->
-                true
-
-            /*
-             * DNS has no referring-page context.
-             *
-             * We cannot reliably determine whether
-             * a DNS lookup is first-party or third-party.
-             *
-             * These are deliberately not treated as
-             * universal blocking rules.
-             */
-            DomainType.FIRST_PARTY ->
-                false
-
-            DomainType.THIRD_PARTY ->
-                true
-        }
-    }
-
     private fun matchesPattern(
-        pattern: String,
-        hostname: String
+        hostname: String,
+        pattern: String
     ): Boolean {
 
         var value =
-            pattern
-                .trim()
-                .lowercase()
+            pattern.trim()
 
-        if (value.isEmpty()) {
+        if (
+            value.isEmpty()
+        ) {
             return false
         }
 
         /*
-         * ||domain^ is the most important EasyList form.
+         * ABP exception rules are not loaded by
+         * AdblockParser, but protect against them here too.
          */
         if (
-            value.startsWith("||")
+            value.startsWith("@@")
         ) {
-
-            value =
-                value.substring(2)
-
-            val end =
-                value.indexOfAny(
-                    charArrayOf(
-                        '^',
-                        '/',
-                        '?',
-                        '*'
-                    )
-                )
-
-            val domain =
-                if (end >= 0) {
-                    value.substring(
-                        0,
-                        end
-                    )
-                } else {
-                    value
-                }
-
-            if (
-                domain.isEmpty()
-            ) {
-                return false
-            }
-
-            return (
-                hostname == domain ||
-                    hostname.endsWith(
-                        ".$domain"
-                    )
-            )
+            return false
         }
 
         /*
-         * |example.com|
+         * Remove URL scheme when present.
          */
-        if (
-            value.startsWith("|") &&
-            value.endsWith("|")
-        ) {
-
-            value =
-                value.substring(
-                    1,
-                    value.length - 1
-                )
-
-            return hostname == value
-        }
-
-        /*
-         * Remove simple URL separators.
-         */
-        value =
-            value.trim('|')
-
-        /*
-         * Exact domain.
-         */
-        if (
-            isValidDomain(value)
-        ) {
-
-            return (
-                hostname == value ||
-                    hostname.endsWith(
-                        ".$value"
-                    )
-            )
-        }
-
-        /*
-         * Wildcard pattern.
-         *
-         * We only apply this to the hostname.
-         */
-        if (
-            value.contains("*")
-        ) {
-
-            val regex =
-                wildcardToRegex(
-                    value
-                )
-
-            return regex.matches(
-                hostname
-            )
-        }
-
-        /*
-         * If the pattern contains a path,
-         * DNS cannot see that path.
-         *
-         * Extract the first recognizable hostname
-         * and compare it.
-         */
-        val hostCandidate =
-            extractHostnameFromPattern(
-                value
-            )
-
-        if (
-            hostCandidate.isNotEmpty()
-        ) {
-
-            return (
-                hostname ==
-                    hostCandidate ||
-                    hostname.endsWith(
-                        ".$hostCandidate"
-                    )
-            )
-        }
-
-        return false
-    }
-
-    private fun extractHostnameFromPattern(
-        pattern: String
-    ): String {
-
-        var value =
-            pattern
-
         value =
             value.removePrefix(
                 "http://"
@@ -599,130 +222,362 @@ class DnsFilter(
                 "https://"
             )
 
-        value =
-            value.trimStart('|')
-
-        value =
-            value.substringBefore('/')
-
-        value =
-            value.substringBefore('^')
-
-        value =
-            value.substringBefore('?')
-
-        value =
-            value.trim('*')
-
-        return if (
-            isValidDomain(value)
+        /*
+         * Handle ABP domain anchor.
+         *
+         * ||example.com^
+         *
+         * means the domain example.com or a subdomain.
+         */
+        if (
+            value.startsWith("||")
         ) {
-            value
-        } else {
-            ""
-        }
-    }
 
-    private fun wildcardToRegex(
-        pattern: String
-    ): Regex {
-
-        val escaped =
-            Regex.escape(
-                pattern
+            return matchesDomainAnchor(
+                hostname,
+                value.substring(2)
             )
-
-        val regex =
-            escaped.replace(
-                "\\*",
-                ".*"
-            )
-
-        return Regex(
-            "^$regex$",
-            RegexOption.IGNORE_CASE
-        )
-    }
-
-    private fun isValidDomain(
-        value: String
-    ): Boolean {
-
-        if (
-            value.isEmpty() ||
-            value.length > 253
-        ) {
-            return false
-        }
-
-        if (
-            value.contains('/') ||
-            value.contains(':') ||
-            value.contains('?') ||
-            value.contains('#') ||
-            value.contains(' ')
-        ) {
-            return false
-        }
-
-        return value.split('.').all { label ->
-
-            label.isNotEmpty() &&
-                label.length <= 63 &&
-                label.first() != '-' &&
-                label.last() != '-' &&
-                label.all {
-                    it.isLetterOrDigit() ||
-                        it == '-'
-                }
-        }
-    }
-
-    private fun isLocalHostname(
-        hostname: String
-    ): Boolean {
-
-        if (
-            hostname == "localhost"
-        ) {
-            return true
-        }
-
-        if (
-            hostname.endsWith(
-                ".localhost"
-            )
-        ) {
-            return true
-        }
-
-        if (
-            hostname.endsWith(
-                ".local"
-            )
-        ) {
-            return true
         }
 
         /*
-         * IP address.
+         * Handle beginning anchor.
          */
+        if (
+            value.startsWith("|")
+        ) {
+
+            value =
+                value.removePrefix("|")
+        }
+
+        /*
+         * Handle ending anchor.
+         */
+        val endAnchored =
+            value.endsWith("|")
+
+        if (endAnchored) {
+            value =
+                value.removeSuffix("|")
+        }
+
+        if (
+            value.isEmpty()
+        ) {
+            return false
+        }
+
+        /*
+         * Convert the supported ABP pattern syntax
+         * into a simple matcher.
+         */
+        val regex =
+            buildRegexFromPattern(
+                value,
+                endAnchored
+            )
+                ?: return false
+
         return try {
 
-            InetAddress
-                .getByName(hostname)
-                .isLoopbackAddress
+            Regex(
+                regex,
+                setOf(
+                    RegexOption.IGNORE_CASE
+                )
+            ).containsMatchIn(
+                hostname
+            )
 
-        } catch (
-            _: Exception
-        ) {
+        } catch (_: Exception) {
 
             false
         }
     }
 
-    private fun clearCache() {
-        cache.clear()
+    private fun matchesDomainAnchor(
+        hostname: String,
+        rawPattern: String
+    ): Boolean {
+
+        var pattern =
+            rawPattern.trim()
+
+        if (
+            pattern.isEmpty()
+        ) {
+            return false
+        }
+
+        /*
+         * Remove an ABP separator at the end.
+         *
+         * ||doubleclick.net^
+         *
+         * becomes:
+         *
+         * doubleclick.net
+         */
+        if (
+            pattern.endsWith("^")
+        ) {
+            pattern =
+                pattern.dropLast(1)
+        }
+
+        /*
+         * Domain-anchor patterns may contain path
+         * components. For DNS filtering we only have
+         * the hostname, so compare the hostname portion.
+         */
+        pattern =
+            pattern
+                .substringBefore("/")
+                .trim('.')
+
+        if (
+            pattern.isEmpty()
+        ) {
+            return false
+        }
+
+        /*
+         * Wildcards inside a domain are supported.
+         */
+        if (
+            pattern.contains("*")
+        ) {
+
+            val regex =
+                buildRegexFromDomain(
+                    pattern
+                )
+
+            return try {
+
+                Regex(
+                    regex,
+                    RegexOption.IGNORE_CASE
+                ).matches(
+                    hostname
+                )
+
+            } catch (_: Exception) {
+
+                false
+            }
+        }
+
+        return hostname == pattern ||
+            hostname.endsWith(
+                ".$pattern"
+            )
+    }
+
+    private fun buildRegexFromDomain(
+        pattern: String
+    ): String {
+
+        val builder =
+            StringBuilder()
+
+        builder.append("^")
+
+        for (
+            character in pattern
+        ) {
+
+            when (character) {
+
+                '*' ->
+                    builder.append(
+                        ".*"
+                    )
+
+                '.' ->
+                    builder.append(
+                        "\\."
+                    )
+
+                else ->
+                    builder.append(
+                        Regex.escape(
+                            character.toString()
+                        )
+                    )
+            }
+        }
+
+        builder.append("$")
+
+        return builder.toString()
+    }
+
+    private fun buildRegexFromPattern(
+        pattern: String,
+        endAnchored: Boolean
+    ): String? {
+
+        val builder =
+            StringBuilder()
+
+        /*
+         * A hostname is what we are matching, not a
+         * complete URL.
+         */
+        builder.append("^")
+
+        var index =
+            0
+
+        while (
+            index < pattern.length
+        ) {
+
+            val character =
+                pattern[index]
+
+            when {
+
+                /*
+                 * ABP wildcard.
+                 */
+                character == '*' -> {
+
+                    builder.append(
+                        ".*"
+                    )
+                }
+
+                /*
+                 * ABP separator character.
+                 *
+                 * ^ matches a URL separator. For DNS
+                 * filtering, the useful interpretation is
+                 * a hostname boundary.
+                 */
+                character == '^' -> {
+
+                    builder.append(
+                        "(?:\\.|$)"
+                    )
+                }
+
+                /*
+                 * Escape regex metacharacters.
+                 */
+                character == '.' -> {
+
+                    builder.append(
+                        "\\."
+                    )
+                }
+
+                character == '?' -> {
+
+                    builder.append(
+                        "\\?"
+                    )
+                }
+
+                character == '+' -> {
+
+                    builder.append(
+                        "\\+"
+                    )
+                }
+
+                character == '(' -> {
+
+                    builder.append(
+                        "\\("
+                    )
+                }
+
+                character == ')' -> {
+
+                    builder.append(
+                        "\\)"
+                    )
+                }
+
+                character == '[' -> {
+
+                    builder.append(
+                        "\\["
+                    )
+                }
+
+                character == ']' -> {
+
+                    builder.append(
+                        "\\]"
+                    )
+                }
+
+                character == '{' -> {
+
+                    builder.append(
+                        "\\{"
+                    )
+                }
+
+                character == '}' -> {
+
+                    builder.append(
+                        "\\}"
+                    )
+                }
+
+                character == '\\' -> {
+
+                    builder.append(
+                        "\\\\"
+                    )
+                }
+
+                character == '$' -> {
+
+                    builder.append(
+                        "\\$"
+                    )
+                }
+
+                else -> {
+
+                    builder.append(
+                        Regex.escape(
+                            character.toString()
+                        )
+                    )
+                }
+            }
+
+            index++
+        }
+
+        if (
+            endAnchored
+        ) {
+            builder.append("$")
+        } else {
+            /*
+             * A plain hostname pattern should be allowed
+             * to match the hostname as a substring.
+             */
+            builder.append(
+                ".*"
+            )
+        }
+
+        return builder.toString()
+    }
+
+    fun ruleCount(): Int {
+        return rules.size
+    }
+
+    fun clearRules() {
+        rules = emptyList()
     }
 }
-
