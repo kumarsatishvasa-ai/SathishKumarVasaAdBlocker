@@ -28,7 +28,7 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          sdkmanager "platform-tools"
+          
           sdkmanager "platforms;android-37"
           sdkmanager "build-tools;35.0.0"
 
