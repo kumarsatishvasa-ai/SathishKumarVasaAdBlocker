@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AdBlockVpnService : VpnService() {
@@ -53,24 +55,25 @@ class AdBlockVpnService : VpnService() {
             24
 
         /*
-         * DNS address exposed inside the VPN.
+         * DNS server exposed to Android applications.
          *
-         * Android applications send DNS traffic here.
+         * Applications send DNS queries to this address
+         * through the VPN interface.
          */
         private const val DNS_ADDRESS =
             "10.8.0.1"
 
+        private const val DNS_PORT =
+            53
+
         /*
-         * Real DNS resolver.
+         * Upstream DNS server.
          *
-         * The socket used to reach this address is protected
-         * from the VPN so it cannot loop back into this service.
+         * The socket is protected with VpnService.protect()
+         * so it does NOT come back through this VPN.
          */
         private const val UPSTREAM_DNS =
             "1.1.1.1"
-
-        private const val DNS_PORT =
-            53
 
         private const val MTU =
             1500
@@ -112,7 +115,8 @@ class AdBlockVpnService : VpnService() {
 
     private val serviceScope =
         CoroutineScope(
-            SupervisorJob() + Dispatchers.IO
+            SupervisorJob() +
+                Dispatchers.IO
         )
 
     private var packetJob: Job? = null
@@ -132,7 +136,7 @@ class AdBlockVpnService : VpnService() {
     private var forwardedDnsCount = 0
 
     // ============================================================
-    // SERVICE LIFECYCLE
+    // SERVICE
     // ============================================================
 
     override fun onCreate() {
@@ -151,7 +155,6 @@ class AdBlockVpnService : VpnService() {
 
             ACTION_STOP -> {
                 stopVpn()
-                return START_NOT_STICKY
             }
 
             ACTION_START -> {
@@ -192,39 +195,67 @@ class AdBlockVpnService : VpnService() {
             /*
              * IMPORTANT:
              *
-             * We route ONLY the DNS server address through
-             * the VPN.
+             * This is a DNS-only VPN.
              *
-             * We intentionally do NOT add:
+             * We DO NOT use:
              *
              * addRoute("0.0.0.0", 0)
              *
-             * Therefore normal Chrome/YouTube HTTP/HTTPS/video
-             * traffic is not processed by this service.
+             * because that would send normal Chrome,
+             * YouTube, HTTPS, QUIC, etc. traffic into
+             * this service.
+             *
+             * This service only processes DNS packets.
              */
             val builder =
                 Builder()
                     .setSession(
-                        applicationInfo
-                            .loadLabel(packageManager)
-                            .toString()
+                        "DNS Ad Blocker"
                     )
                     .setMtu(MTU)
+
+                    /*
+                     * VPN interface address.
+                     */
                     .addAddress(
                         VPN_ADDRESS,
                         VPN_PREFIX
                     )
+
+                    /*
+                     * Tell Android that our VPN DNS
+                     * server is 10.8.0.1.
+                     */
                     .addDnsServer(
                         DNS_ADDRESS
                     )
+
+                    /*
+                     * Only route the VPN DNS address
+                     * into our TUN interface.
+                     */
                     .addRoute(
                         DNS_ADDRESS,
                         32
                     )
 
+                    /*
+                     * VERY IMPORTANT:
+                     *
+                     * Do not capture IPv6 traffic.
+                     *
+                     * Chrome and YouTube can use IPv6.
+                     * Allowing IPv6 to fall through to the
+                     * normal network prevents the VPN from
+                     * accidentally breaking IPv6 connectivity.
+                     */
+                    .allowFamily(
+                        OsConstants.AF_INET6
+                    )
+
             /*
-             * Prevent our own application from accidentally
-             * sending its traffic through its own VPN.
+             * Do not route our own application into
+             * its own VPN.
              */
             try {
 
@@ -236,7 +267,7 @@ class AdBlockVpnService : VpnService() {
 
                 android.util.Log.w(
                     TAG,
-                    "Could not exclude own package",
+                    "Could not exclude own application",
                     e
                 )
             }
@@ -246,8 +277,13 @@ class AdBlockVpnService : VpnService() {
 
             if (established == null) {
 
+                android.util.Log.e(
+                    TAG,
+                    "VPN establish() returned null"
+                )
+
                 updateNotification(
-                    "Could not establish VPN"
+                    "VPN could not be established"
                 )
 
                 stopVpn()
@@ -269,13 +305,14 @@ class AdBlockVpnService : VpnService() {
                 )
 
             running.set(true)
+
             isRunning = true
+
+            updateDiagnosticNotification()
 
             startPacketLoop()
 
             startFilterRefresh()
-
-            updateDiagnosticNotification()
 
             android.util.Log.i(
                 TAG,
@@ -286,7 +323,7 @@ class AdBlockVpnService : VpnService() {
 
             android.util.Log.e(
                 TAG,
-                "VPN startup failed",
+                "Failed to start VPN",
                 e
             )
 
@@ -299,7 +336,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     // ============================================================
-    // VPN PACKET LOOP
+    // PACKET LOOP
     // ============================================================
 
     private fun startPacketLoop() {
@@ -320,7 +357,8 @@ class AdBlockVpnService : VpnService() {
                 ) {
 
                     val input =
-                        inputStream ?: break
+                        inputStream
+                            ?: break
 
                     try {
 
@@ -331,10 +369,10 @@ class AdBlockVpnService : VpnService() {
                             continue
                         }
 
-                        val packet =
-                            buffer.copyOf(length)
-
-                        processIpv4Packet(packet)
+                        processPacket(
+                            buffer,
+                            length
+                        )
 
                     } catch (e: Exception) {
 
@@ -354,64 +392,71 @@ class AdBlockVpnService : VpnService() {
     }
 
     // ============================================================
-    // IPV4
+    // IP PACKET
     // ============================================================
 
-    private fun processIpv4Packet(
-        packet: ByteArray
+    private fun processPacket(
+        buffer: ByteArray,
+        packetLength: Int
     ) {
 
+        /*
+         * We only understand IPv4 here.
+         *
+         * IPv6 is intentionally allowed to bypass
+         * this VPN.
+         */
         if (
-            packet.size <
-            IPV4_HEADER_LENGTH
+            packetLength < IPV4_HEADER_LENGTH
         ) {
             return
         }
 
         val version =
-            (packet[0].toInt() ushr 4) and 0x0F
+            (buffer[0].toInt() ushr 4) and 0x0F
 
         if (version != 4) {
             return
         }
 
         val headerLength =
-            (packet[0].toInt() and 0x0F) * 4
+            (buffer[0].toInt() and 0x0F) * 4
 
         if (
             headerLength < IPV4_HEADER_LENGTH ||
-            headerLength > packet.size
+            headerLength > packetLength
         ) {
             return
         }
 
         val totalLength =
             readUnsignedShort(
-                packet,
+                buffer,
                 2
             )
 
         if (
             totalLength < headerLength ||
-            totalLength > packet.size
+            totalLength > packetLength
         ) {
             return
         }
 
-        val protocol =
-            packet[9].toInt() and 0xFF
-
         /*
          * Only UDP is handled.
          *
-         * TCP/HTTPS/QUIC/etc. are intentionally ignored.
+         * Because the VPN only routes DNS_ADDRESS,
+         * normal TCP/HTTPS traffic should never arrive here.
          */
+        val protocol =
+            buffer[9].toInt() and 0xFF
+
         if (protocol != UDP_PROTOCOL) {
             return
         }
 
         processUdpPacket(
-            packet,
+            buffer,
             totalLength,
             headerLength
         )
@@ -469,7 +514,7 @@ class AdBlockVpnService : VpnService() {
         }
 
         /*
-         * Only DNS requests going to port 53.
+         * Only DNS destination port 53.
          */
         if (
             destinationPort != DNS_PORT
@@ -478,10 +523,12 @@ class AdBlockVpnService : VpnService() {
         }
 
         val dnsOffset =
-            udpOffset + UDP_HEADER_LENGTH
+            udpOffset +
+                UDP_HEADER_LENGTH
 
         val dnsLength =
-            udpLength - UDP_HEADER_LENGTH
+            udpLength -
+                UDP_HEADER_LENGTH
 
         if (
             dnsLength < DNS_HEADER_LENGTH
@@ -527,14 +574,20 @@ class AdBlockVpnService : VpnService() {
 
         dnsQueryCount++
 
+        /*
+         * Safely extract the queried hostname.
+         */
         val hostname =
             parseDnsQuestionName(
                 dnsQuery
             )
 
         /*
-         * If we cannot parse the question,
-         * fail open and forward it.
+         * If we cannot understand the DNS packet,
+         * FAIL OPEN.
+         *
+         * This is deliberately chosen to protect
+         * Chrome/YouTube connectivity.
          */
         if (hostname.isNullOrBlank()) {
 
@@ -543,6 +596,7 @@ class AdBlockVpnService : VpnService() {
             forwardDnsQuery(
                 originalPacket,
                 originalLength,
+                ipHeaderLength,
                 sourcePort,
                 destinationPort,
                 dnsQuery
@@ -557,7 +611,7 @@ class AdBlockVpnService : VpnService() {
             hostname
                 .trim()
                 .trim('.')
-                .lowercase()
+                .lowercase(Locale.US)
 
         android.util.Log.d(
             TAG,
@@ -565,17 +619,15 @@ class AdBlockVpnService : VpnService() {
         )
 
         /*
-         * ========================================================
-         * IMPORTANT:
-         *
-         * FilterManager.isBlockedHost() is called ONLY here,
-         * with the actual queried hostname.
-         * ========================================================
+         * Ask FilterManager ONLY about the hostname
+         * that was actually queried.
          */
-
         val blocked =
             try {
 
+                /*
+                 * Allowlist is handled by FilterManager.
+                 */
                 FilterManager.isBlockedHost(
                     this,
                     normalized
@@ -583,16 +635,16 @@ class AdBlockVpnService : VpnService() {
 
             } catch (e: Exception) {
 
-                android.util.Log.e(
+                /*
+                 * Filter problems must NEVER break
+                 * Internet connectivity.
+                 */
+                android.util.Log.w(
                     TAG,
                     "Filter check failed for $normalized",
                     e
                 )
 
-                /*
-                 * Never break Internet access because
-                 * the filter database has a problem.
-                 */
                 false
             }
 
@@ -614,19 +666,37 @@ class AdBlockVpnService : VpnService() {
                 "BLOCKED: $normalized"
             )
 
-            val response =
-                buildNxDomainResponse(
+            val blockedResponse =
+                buildBlockedDnsResponse(
                     dnsQuery
                 )
 
-            if (response != null) {
+            if (blockedResponse != null) {
 
                 writeDnsResponse(
-                    originalPacket = originalPacket,
-                    originalLength = originalLength,
-                    sourcePort = sourcePort,
-                    destinationPort = destinationPort,
-                    dnsResponse = response
+                    originalPacket,
+                    originalLength,
+                    ipHeaderLength,
+                    sourcePort,
+                    destinationPort,
+                    blockedResponse
+                )
+
+            } else {
+
+                /*
+                 * If we cannot construct a safe
+                 * blocking response, fail open.
+                 */
+                forwardedDnsCount++
+
+                forwardDnsQuery(
+                    originalPacket,
+                    originalLength,
+                    ipHeaderLength,
+                    sourcePort,
+                    destinationPort,
+                    dnsQuery
                 )
             }
 
@@ -639,16 +709,13 @@ class AdBlockVpnService : VpnService() {
                 "ALLOWED: $normalized"
             )
 
-            /*
-             * Send the original DNS packet unchanged
-             * to the upstream resolver.
-             */
             forwardDnsQuery(
-                originalPacket = originalPacket,
-                originalLength = originalLength,
-                sourcePort = sourcePort,
-                destinationPort = destinationPort,
-                dnsQuery = dnsQuery
+                originalPacket,
+                originalLength,
+                ipHeaderLength,
+                sourcePort,
+                destinationPort,
+                dnsQuery
             )
         }
 
@@ -665,21 +732,40 @@ class AdBlockVpnService : VpnService() {
 
         if (
             dnsPacket.size <
-            DNS_HEADER_LENGTH + 1
+            DNS_HEADER_LENGTH + 5
         ) {
             return null
         }
 
         /*
-         * QDCOUNT
+         * QR bit.
+         *
+         * We only want client queries.
+         *
+         * QR = 0 => query
+         * QR = 1 => response
          */
+        val flags =
+            readUnsignedShort(
+                dnsPacket,
+                2
+            )
+
+        if (
+            flags and 0x8000 != 0
+        ) {
+            return null
+        }
+
         val questionCount =
             readUnsignedShort(
                 dnsPacket,
                 4
             )
 
-        if (questionCount <= 0) {
+        if (
+            questionCount <= 0
+        ) {
             return null
         }
 
@@ -700,18 +786,18 @@ class AdBlockVpnService : VpnService() {
             position++
 
             /*
-             * End of QNAME.
+             * End of hostname.
              */
             if (length == 0) {
                 break
             }
 
             /*
-             * Compression pointers are not expected
-             * in a DNS question.
+             * Compression pointer is not expected
+             * in a normal question name.
              */
             if (
-                (length and 0xC0) != 0
+                length and 0xC0 != 0
             ) {
                 return null
             }
@@ -743,6 +829,21 @@ class AdBlockVpnService : VpnService() {
                 return null
             }
 
+            /*
+             * Reject obviously invalid hostname characters.
+             */
+            for (character in label) {
+
+                val valid =
+                    character.isLetterOrDigit() ||
+                        character == '-' ||
+                        character == '_'
+
+                if (!valid) {
+                    return null
+                }
+            }
+
             labels.add(label)
 
             position += length
@@ -758,14 +859,14 @@ class AdBlockVpnService : VpnService() {
 
         return labels
             .joinToString(".")
-            .lowercase()
+            .lowercase(Locale.US)
     }
 
     // ============================================================
     // BLOCKED DNS RESPONSE
     // ============================================================
 
-    private fun buildNxDomainResponse(
+    private fun buildBlockedDnsResponse(
         query: ByteArray
     ): ByteArray? {
 
@@ -777,7 +878,8 @@ class AdBlockVpnService : VpnService() {
         }
 
         /*
-         * Keep the original question section.
+         * We return the original DNS question
+         * with an NXDOMAIN response.
          */
         val response =
             query.copyOf()
@@ -823,7 +925,7 @@ class AdBlockVpnService : VpnService() {
         )
 
         /*
-         * One question.
+         * QDCOUNT = 1
          */
         writeUnsignedShort(
             response,
@@ -862,12 +964,13 @@ class AdBlockVpnService : VpnService() {
     }
 
     // ============================================================
-    // UPSTREAM DNS
+    // FORWARD DNS
     // ============================================================
 
     private fun forwardDnsQuery(
         originalPacket: ByteArray,
         originalLength: Int,
+        ipHeaderLength: Int,
         sourcePort: Int,
         destinationPort: Int,
         dnsQuery: ByteArray
@@ -881,14 +984,10 @@ class AdBlockVpnService : VpnService() {
                 DatagramSocket()
 
             /*
-             * VERY IMPORTANT.
+             * CRITICAL.
              *
-             * This prevents the upstream DNS socket from
-             * being captured by this VPN.
-             *
-             * Without protect(), DNS can loop:
-             *
-             * VPN -> 1.1.1.1 -> VPN -> 1.1.1.1 ...
+             * Without protect(), the socket could be routed
+             * back through our VPN and create a DNS loop.
              */
             if (!protect(socket)) {
 
@@ -897,6 +996,10 @@ class AdBlockVpnService : VpnService() {
                     "Could not protect upstream DNS socket"
                 )
 
+                /*
+                 * Fail silently rather than injecting
+                 * a fake failure into the application.
+                 */
                 return
             }
 
@@ -913,7 +1016,9 @@ class AdBlockVpnService : VpnService() {
                     )
                 )
 
-            socket.send(request)
+            socket.send(
+                request
+            )
 
             val responseBuffer =
                 ByteArray(
@@ -943,6 +1048,9 @@ class AdBlockVpnService : VpnService() {
 
             /*
              * Verify DNS transaction ID.
+             *
+             * This prevents an unrelated response from
+             * being delivered to the application.
              */
             if (
                 dnsQuery.size >= 2 &&
@@ -950,16 +1058,16 @@ class AdBlockVpnService : VpnService() {
             ) {
 
                 val queryId =
-                    (
-                        ((dnsQuery[0].toInt() and 0xFF) shl 8) or
-                            (dnsQuery[1].toInt() and 0xFF)
-                        )
+                    readUnsignedShort(
+                        dnsQuery,
+                        0
+                    )
 
                 val responseId =
-                    (
-                        ((response[0].toInt() and 0xFF) shl 8) or
-                            (response[1].toInt() and 0xFF)
-                        )
+                    readUnsignedShort(
+                        response,
+                        0
+                    )
 
                 if (
                     queryId != responseId
@@ -975,18 +1083,24 @@ class AdBlockVpnService : VpnService() {
             }
 
             writeDnsResponse(
-                originalPacket = originalPacket,
-                originalLength = originalLength,
-                sourcePort = sourcePort,
-                destinationPort = destinationPort,
-                dnsResponse = response
+                originalPacket,
+                originalLength,
+                ipHeaderLength,
+                sourcePort,
+                destinationPort,
+                response
             )
 
         } catch (e: Exception) {
 
+            /*
+             * DNS timeout/network failure.
+             *
+             * Do not crash the VPN.
+             */
             android.util.Log.w(
                 TAG,
-                "DNS forwarding failed",
+                "Upstream DNS failed",
                 e
             )
 
@@ -1000,21 +1114,47 @@ class AdBlockVpnService : VpnService() {
     }
 
     // ============================================================
-    // WRITE DNS RESPONSE INTO VPN
+    // WRITE DNS RESPONSE
     // ============================================================
 
     private fun writeDnsResponse(
         originalPacket: ByteArray,
         originalLength: Int,
+        ipHeaderLength: Int,
         sourcePort: Int,
         destinationPort: Int,
         dnsResponse: ByteArray
     ) {
 
         val output =
-            outputStream ?: return
+            outputStream
+                ?: return
 
         if (dnsResponse.isEmpty()) {
+            return
+        }
+
+        /*
+         * Keep the response within a reasonable
+         * IPv4 UDP packet size for our MTU.
+         *
+         * If an upstream response is too large,
+         * don't inject a malformed packet.
+         */
+        val maxDnsSize =
+            MTU -
+                IPV4_HEADER_LENGTH -
+                UDP_HEADER_LENGTH
+
+        if (
+            dnsResponse.size > maxDnsSize
+        ) {
+
+            android.util.Log.w(
+                TAG,
+                "DNS response too large: ${dnsResponse.size}"
+            )
+
             return
         }
 
@@ -1028,13 +1168,12 @@ class AdBlockVpnService : VpnService() {
         /*
          * Original:
          *
-         * device -> 10.8.0.1
+         * 10.8.0.2 -> 10.8.0.1
          *
          * Response:
          *
-         * 10.8.0.1 -> device
+         * 10.8.0.1 -> 10.8.0.2
          */
-
         val originalSourceIp =
             originalPacket.copyOfRange(
                 12,
@@ -1055,38 +1194,30 @@ class AdBlockVpnService : VpnService() {
             IPV4_HEADER_LENGTH +
                 udpLength
 
-        if (
-            ipLength > 65535
-        ) {
-            return
-        }
-
         val responsePacket =
             ByteArray(
                 ipLength
             )
 
-        /*
-         * ========================================================
-         * IPv4 HEADER
-         * ========================================================
-         */
+        // --------------------------------------------------------
+        // IPv4 HEADER
+        // --------------------------------------------------------
 
         /*
-         * Version = 4
-         * IHL = 5
+         * Version 4
+         * IHL 5
          */
         responsePacket[0] =
             0x45.toByte()
 
         /*
-         * DSCP/ECN
+         * DSCP / ECN
          */
         responsePacket[1] =
             originalPacket[1]
 
         /*
-         * Total length
+         * Total length.
          */
         writeUnsignedShort(
             responsePacket,
@@ -1095,7 +1226,7 @@ class AdBlockVpnService : VpnService() {
         )
 
         /*
-         * Preserve identification.
+         * Copy identification.
          */
         responsePacket[4] =
             originalPacket[4]
@@ -1104,22 +1235,22 @@ class AdBlockVpnService : VpnService() {
             originalPacket[5]
 
         /*
-         * Don't fragment.
+         * Fragmentation flags/offset = 0
          */
         responsePacket[6] =
-            0x40
+            0
 
         responsePacket[7] =
             0
 
         /*
-         * TTL
+         * TTL.
          */
         responsePacket[8] =
             64
 
         /*
-         * UDP
+         * UDP.
          */
         responsePacket[9] =
             UDP_PROTOCOL.toByte()
@@ -1134,9 +1265,7 @@ class AdBlockVpnService : VpnService() {
             0
 
         /*
-         * Source:
-         *
-         * original destination
+         * Reverse IP addresses.
          */
         System.arraycopy(
             originalDestinationIp,
@@ -1146,11 +1275,6 @@ class AdBlockVpnService : VpnService() {
             4
         )
 
-        /*
-         * Destination:
-         *
-         * original source
-         */
         System.arraycopy(
             originalSourceIp,
             0,
@@ -1159,6 +1283,9 @@ class AdBlockVpnService : VpnService() {
             4
         )
 
+        /*
+         * IPv4 checksum.
+         */
         val ipChecksum =
             calculateChecksum(
                 responsePacket,
@@ -1172,15 +1299,12 @@ class AdBlockVpnService : VpnService() {
             ipChecksum
         )
 
-        /*
-         * ========================================================
-         * UDP HEADER
-         * ========================================================
-         */
+        // --------------------------------------------------------
+        // UDP HEADER
+        // --------------------------------------------------------
 
         /*
-         * Response source port =
-         * original destination port.
+         * Reverse source/destination ports.
          */
         writeUnsignedShort(
             responsePacket,
@@ -1188,10 +1312,6 @@ class AdBlockVpnService : VpnService() {
             destinationPort
         )
 
-        /*
-         * Response destination port =
-         * original source port.
-         */
         writeUnsignedShort(
             responsePacket,
             22,
@@ -1207,7 +1327,7 @@ class AdBlockVpnService : VpnService() {
         /*
          * UDP checksum = 0.
          *
-         * Zero is valid for IPv4 UDP.
+         * UDP checksum zero is valid for IPv4.
          */
         responsePacket[26] =
             0
@@ -1215,11 +1335,9 @@ class AdBlockVpnService : VpnService() {
         responsePacket[27] =
             0
 
-        /*
-         * ========================================================
-         * DNS PAYLOAD
-         * ========================================================
-         */
+        // --------------------------------------------------------
+        // DNS
+        // --------------------------------------------------------
 
         System.arraycopy(
             dnsResponse,
@@ -1244,7 +1362,7 @@ class AdBlockVpnService : VpnService() {
 
                 android.util.Log.w(
                     TAG,
-                    "Could not write DNS response",
+                    "Failed to write DNS response",
                     e
                 )
             }
@@ -1263,7 +1381,7 @@ class AdBlockVpnService : VpnService() {
             serviceScope.launch {
 
                 /*
-                 * Initial filter update.
+                 * Initial update.
                  */
                 try {
 
@@ -1325,8 +1443,8 @@ class AdBlockVpnService : VpnService() {
         }
 
         updateNotification(
-            "DNS: $dnsQueryCount • " +
-                "Blocked: $blockedDnsCount • " +
+            "DNS: $dnsQueryCount  •  " +
+                "Blocked: $blockedDnsCount  •  " +
                 "Forwarded: $forwardedDnsCount"
         )
     }
@@ -1361,24 +1479,19 @@ class AdBlockVpnService : VpnService() {
         text: String
     ): Notification {
 
-        val appName =
-            applicationInfo
-                .loadLabel(packageManager)
-                .toString()
-
         return NotificationCompat
             .Builder(
                 this,
                 CHANNEL_ID
             )
             .setContentTitle(
-                appName
+                "DNS Ad Blocker"
             )
             .setContentText(
                 text
             )
             .setSmallIcon(
-                android.R.drawable.ic_menu_info_details
+                android.R.drawable.stat_sys_warning
             )
             .setOngoing(true)
             .setCategory(
@@ -1407,7 +1520,7 @@ class AdBlockVpnService : VpnService() {
         val channel =
             NotificationChannel(
                 CHANNEL_ID,
-                "Ad Blocker VPN",
+                "DNS Ad Blocker",
                 NotificationManager.IMPORTANCE_LOW
             )
 
@@ -1462,15 +1575,11 @@ class AdBlockVpnService : VpnService() {
             index += 2
         }
 
-        if (
-            index < end
-        ) {
+        if (index < end) {
 
             sum +=
-                (
-                    (data[index].toInt() and 0xFF)
-                        .toLong() shl 8
-                    )
+                ((data[index].toInt() and 0xFF)
+                    .toLong() shl 8)
         }
 
         while (
@@ -1541,26 +1650,26 @@ class AdBlockVpnService : VpnService() {
             !running.get() &&
             vpnInterface == null
         ) {
+            isRunning = false
             return
         }
 
         running.set(false)
+
         isRunning = false
 
         /*
-         * Stop packet processing.
+         * Cancel coroutines first.
          */
         packetJob?.cancel()
         packetJob = null
 
-        /*
-         * Stop filter updater.
-         */
         filterJob?.cancel()
         filterJob = null
 
         /*
-         * Close input.
+         * Closing the streams also unblocks
+         * a read() waiting on the TUN interface.
          */
         try {
             inputStream?.close()
@@ -1569,9 +1678,6 @@ class AdBlockVpnService : VpnService() {
 
         inputStream = null
 
-        /*
-         * Close output.
-         */
         try {
             outputStream?.close()
         } catch (_: Exception) {
@@ -1580,8 +1686,7 @@ class AdBlockVpnService : VpnService() {
         outputStream = null
 
         /*
-         * Closing the VPN descriptor restores normal
-         * networking.
+         * Close VPN interface.
          */
         val descriptor =
             vpnInterface
@@ -1594,11 +1699,12 @@ class AdBlockVpnService : VpnService() {
         }
 
         /*
-         * Remove foreground notification.
+         * Stop foreground service.
          *
-         * Use the compatibility-safe boolean overload.
-         * This avoids STOP_FOREGROUND_REMOVE problems
-         * on projects with older compile SDK/API combinations.
+         * Use the deprecated-compatible form because
+         * it works across older Android API levels and
+         * avoids the STOP_FOREGROUND_REMOVE compilation
+         * problem from the previous version.
          */
         try {
 
@@ -1616,11 +1722,6 @@ class AdBlockVpnService : VpnService() {
     // ============================================================
 
     override fun onRevoke() {
-
-        android.util.Log.i(
-            TAG,
-            "VPN permission revoked"
-        )
 
         stopVpn()
 
