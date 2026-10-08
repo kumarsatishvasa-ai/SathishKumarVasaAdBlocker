@@ -1,5 +1,3 @@
-writing{variant="standard" id="74163" title="File 4 — FilterManager.kt"}
-
 package com.sathishkumarvasa.adblocker
 
 import android.content.Context
