@@ -1,5 +1,3 @@
-writing{variant="document" id="74126" title="AndroidManifest.xml"} <?xml version="1.0" encoding="utf-8"?>
-
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
 <!-- Internet access for downloading filter lists and contacting DNS --> <uses-permission android:name="android.permission.INTERNET" />
