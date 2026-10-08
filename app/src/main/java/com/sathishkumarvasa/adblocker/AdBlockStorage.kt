@@ -4,55 +4,33 @@ import android.content.Context
 
 object AdBlockStorage {
 
-    private const val PREFS_NAME =
-        "sathish_kumar_vasa_adblocker"
+    private const val PREFS = "adblock_storage"
 
-    private const val KEY_ENABLED =
-        "enabled"
+    private const val KEY_ENABLED = "enabled"
+    private const val KEY_BLOCKED_COUNT = "blocked_count"
+    private const val KEY_RULE_COUNT = "rule_count"
+    private const val KEY_LAST_UPDATE = "last_update"
+    private const val KEY_ALLOWLIST = "allowlist"
+    private const val KEY_CUSTOM_RULES = "custom_rules"
 
-    private const val KEY_BLOCKED_COUNT =
-        "blocked_count"
-
-    private const val KEY_RULE_COUNT =
-        "rule_count"
-
-    private const val KEY_LAST_UPDATE =
-        "last_update"
-
-    private const val KEY_ALLOWLIST =
-        "allowlist"
-
-    private const val KEY_CUSTOM_RULES =
-        "custom_rules"
-
-
-    private fun preferences(context: Context) =
+    private fun prefs(context: Context) =
         context.getSharedPreferences(
-            PREFS_NAME,
+            PREFS,
             Context.MODE_PRIVATE
         )
 
-
-    // ---------------------------------------------------
-    // Protection enabled
-    // ---------------------------------------------------
-
     fun isEnabled(context: Context): Boolean {
-
-        return preferences(context)
-            .getBoolean(
-                KEY_ENABLED,
-                true
-            )
+        return prefs(context).getBoolean(
+            KEY_ENABLED,
+            true
+        )
     }
-
 
     fun setEnabled(
         context: Context,
         enabled: Boolean
     ) {
-
-        preferences(context)
+        prefs(context)
             .edit()
             .putBoolean(
                 KEY_ENABLED,
@@ -61,160 +39,111 @@ object AdBlockStorage {
             .apply()
     }
 
-
-    // ---------------------------------------------------
-    // Blocked counter
-    // ---------------------------------------------------
-
-    fun getBlockedCount(
+    fun incrementBlockedCount(
         context: Context
-    ): Long {
-
-        return preferences(context)
-            .getLong(
-                KEY_BLOCKED_COUNT,
-                0L
-            )
-    }
-
-
-    fun setBlockedCount(
-        context: Context,
-        count: Long
     ) {
+        val current =
+            getBlockedCount(context)
 
-        preferences(context)
+        prefs(context)
             .edit()
             .putLong(
                 KEY_BLOCKED_COUNT,
-                count.coerceAtLeast(0L)
+                current + 1
             )
             .apply()
     }
 
-
-    fun incrementBlockedCount(
-        context: Context,
-        amount: Long = 1L
-    ) {
-
-        if (amount <= 0L) {
-            return
-        }
-
-        synchronized(this) {
-
-            val current =
-                getBlockedCount(context)
-
-            setBlockedCount(
-                context,
-                current + amount
-            )
-        }
-    }
-
-
-    fun resetBlockedCount(
+    fun getBlockedCount(
         context: Context
-    ) {
-
-        setBlockedCount(
-            context,
+    ): Long {
+        return prefs(context).getLong(
+            KEY_BLOCKED_COUNT,
             0L
         )
     }
 
-
-    // ---------------------------------------------------
-    // Filter rule count
-    // ---------------------------------------------------
-
-    fun getRuleCount(
+    fun resetBlockedCount(
         context: Context
-    ): Int {
-
-        return preferences(context)
-            .getInt(
-                KEY_RULE_COUNT,
-                0
+    ) {
+        prefs(context)
+            .edit()
+            .putLong(
+                KEY_BLOCKED_COUNT,
+                0L
             )
+            .apply()
     }
-
 
     fun setRuleCount(
         context: Context,
         count: Int
     ) {
-
-        preferences(context)
+        prefs(context)
             .edit()
             .putInt(
                 KEY_RULE_COUNT,
-                count.coerceAtLeast(0)
+                count
             )
             .apply()
     }
 
+    fun getRuleCount(
+        context: Context
+    ): Int {
+        return prefs(context).getInt(
+            KEY_RULE_COUNT,
+            0
+        )
+    }
 
-    // ---------------------------------------------------
-    // Last filter update
-    // ---------------------------------------------------
+    fun setLastUpdate(
+        context: Context
+    ) {
+        prefs(context)
+            .edit()
+            .putLong(
+                KEY_LAST_UPDATE,
+                System.currentTimeMillis()
+            )
+            .apply()
+    }
 
     fun getLastUpdate(
         context: Context
     ): Long {
-
-        return preferences(context)
-            .getLong(
-                KEY_LAST_UPDATE,
-                0L
-            )
+        return prefs(context).getLong(
+            KEY_LAST_UPDATE,
+            0L
+        )
     }
-
-
-    fun setLastUpdate(
-        context: Context,
-        timestamp: Long = System.currentTimeMillis()
-    ) {
-
-        preferences(context)
-            .edit()
-            .putLong(
-                KEY_LAST_UPDATE,
-                timestamp
-            )
-            .apply()
-    }
-
-
-    // ---------------------------------------------------
-    // Allowlist
-    // ---------------------------------------------------
 
     fun getAllowlist(
         context: Context
     ): Set<String> {
-
-        return preferences(context)
+        return prefs(context)
             .getStringSet(
                 KEY_ALLOWLIST,
                 emptySet()
             )
+            ?.map {
+                it.trim()
+                    .trim('.')
+                    .lowercase()
+            }
             ?.toSet()
             ?: emptySet()
     }
 
-
     fun setAllowlist(
         context: Context,
-        domains: Collection<String>
+        hosts: Set<String>
     ) {
-
-        val cleaned =
-            domains
+        val normalized =
+            hosts
                 .map {
                     it.trim()
+                        .trim('.')
                         .lowercase()
                 }
                 .filter {
@@ -222,192 +151,104 @@ object AdBlockStorage {
                 }
                 .toSet()
 
-        preferences(context)
+        prefs(context)
             .edit()
             .putStringSet(
                 KEY_ALLOWLIST,
-                cleaned
+                normalized
             )
             .apply()
     }
 
-
-    fun addAllowlistedDomain(
+    fun addAllowlistHost(
         context: Context,
-        domain: String
+        host: String
     ) {
-
-        val cleaned =
-            domain
-                .trim()
-                .lowercase()
-
-        if (cleaned.isEmpty()) {
-            return
-        }
-
-        val domains =
+        val current =
             getAllowlist(context)
                 .toMutableSet()
 
-        domains.add(cleaned)
+        current.add(
+            host.trim()
+                .trim('.')
+                .lowercase()
+        )
 
         setAllowlist(
             context,
-            domains
+            current
         )
     }
 
-
-    fun removeAllowlistedDomain(
+    fun removeAllowlistHost(
         context: Context,
-        domain: String
+        host: String
     ) {
-
-        val cleaned =
-            domain
-                .trim()
-                .lowercase()
-
-        val domains =
+        val current =
             getAllowlist(context)
                 .toMutableSet()
 
-        domains.remove(cleaned)
+        current.remove(
+            host.trim()
+                .trim('.')
+                .lowercase()
+        )
 
         setAllowlist(
             context,
-            domains
+            current
         )
     }
-
-
-    fun isDomainAllowlisted(
-        context: Context,
-        domain: String
-    ): Boolean {
-
-        val cleaned =
-            domain
-                .trim()
-                .lowercase()
-
-        return getAllowlist(context)
-            .contains(cleaned)
-    }
-
-
-    // ---------------------------------------------------
-    // Custom rules
-    // ---------------------------------------------------
 
     fun getCustomRules(
         context: Context
-    ): List<String> {
-
-        return preferences(context)
+    ): Set<String> {
+        return prefs(context)
             .getStringSet(
                 KEY_CUSTOM_RULES,
                 emptySet()
             )
-            ?.toList()
-            ?: emptyList()
+            ?.toSet()
+            ?: emptySet()
     }
-
 
     fun setCustomRules(
         context: Context,
-        rules: Collection<String>
+        rules: Set<String>
     ) {
-
-        val cleaned =
-            rules
-                .map {
-                    it.trim()
-                }
-                .filter {
-                    it.isNotEmpty()
-                }
-                .toSet()
-
-        preferences(context)
+        prefs(context)
             .edit()
             .putStringSet(
                 KEY_CUSTOM_RULES,
-                cleaned
+                rules
             )
             .apply()
     }
-
 
     fun addCustomRule(
         context: Context,
         rule: String
-    ): Boolean {
-
-        val cleaned =
-            rule.trim()
-
-        if (cleaned.isEmpty()) {
-            return false
-        }
-
-        val rules =
-            getCustomRules(context)
-                .toMutableSet()
-
-        val added =
-            rules.add(cleaned)
-
-        if (added) {
-
-            setCustomRules(
-                context,
-                rules
-            )
-        }
-
-        return added
-    }
-
-
-    fun removeCustomRule(
-        context: Context,
-        rule: String
     ) {
-
-        val rules =
+        val current =
             getCustomRules(context)
                 .toMutableSet()
 
-        rules.remove(
-            rule.trim()
-        )
+        if (rule.isNotBlank()) {
+            current.add(rule.trim())
+        }
 
         setCustomRules(
             context,
-            rules
+            current
         )
     }
 
-
-    // ---------------------------------------------------
-    // Reset application data
-    // ---------------------------------------------------
-
-    fun resetAll(
+    fun clearAll(
         context: Context
     ) {
-
-        preferences(context)
+        prefs(context)
             .edit()
             .clear()
             .apply()
-
-        // Protection is enabled by default.
-        setEnabled(
-            context,
-            true
-        )
     }
 }
