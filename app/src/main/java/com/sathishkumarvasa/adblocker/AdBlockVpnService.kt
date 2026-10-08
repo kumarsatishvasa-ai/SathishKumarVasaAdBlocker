@@ -1,6 +1,29 @@
 package com.sathishkumarvasa.adblocker
 
-import android.app.Notification import android.app.NotificationChannel import android.app.NotificationManager import android.content.Intent import android.net.VpnService import android.os.Build import android.os.IBinder import android.os.ParcelFileDescriptor import androidx.core.app.NotificationCompat import kotlinx.coroutines.CoroutineScope import kotlinx.coroutines.Dispatchers import kotlinx.coroutines.Job import kotlinx.coroutines.SupervisorJob import kotlinx.coroutines.cancel import kotlinx.coroutines.delay import kotlinx.coroutines.isActive import kotlinx.coroutines.launch import java.io.FileInputStream import java.io.FileOutputStream import java.net.DatagramPacket import java.net.DatagramSocket import java.net.InetSocketAddress import java.net.Socket import java.util.concurrent.atomic.AtomicBoolean
+import android.app.Notification 
+import android.app.NotificationChannel 
+import android.app.NotificationManager 
+import android.content.Intent 
+import android.net.VpnService 
+import android.os.Build 
+import android.os.IBinder 
+import android.os.ParcelFileDescriptor 
+import androidx.core.app.NotificationCompat 
+import kotlinx.coroutines.CoroutineScope 
+import kotlinx.coroutines.Dispatchers 
+import kotlinx.coroutines.Job 
+import kotlinx.coroutines.SupervisorJob 
+import kotlinx.coroutines.cancel 
+import kotlinx.coroutines.delay 
+import kotlinx.coroutines.isActive 
+import kotlinx.coroutines.launch
+import java.io.FileInputStream
+import java.io.FileOutputStream 
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetSocketAddress
+import java.net.Socket 
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AdBlockVpnService : VpnService() {
 
