@@ -1,7 +1,10 @@
 package com.sathishkumarvasa.adblocker
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -24,6 +27,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,8 +49,26 @@ class MainActivity : ComponentActivity() {
                 Toast.makeText(
                     this,
                     "VPN permission was not granted",
-                    Toast.LENGTH_SHORT
+                    Toast.LENGTH_LONG
                 ).show()
+            }
+        }
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+
+            if (granted) {
+                requestVpnPermission()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Notification permission denied. VPN can still be requested.",
+                    Toast.LENGTH_LONG
+                ).show()
+
+                requestVpnPermission()
             }
         }
 
@@ -65,44 +87,106 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestVpnPermission() {
-        val intent = VpnService.prepare(this)
+    private fun requestNotificationPermissionIfNeeded() {
 
-        if (intent != null) {
-            vpnPermissionLauncher.launch(intent)
-        } else {
-            startAdBlocker()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+
+            if (
+                checkSelfPermission(
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+
+                notificationPermissionLauncher.launch(
+                    Manifest.permission.POST_NOTIFICATIONS
+                )
+
+                return
+            }
+        }
+
+        requestVpnPermission()
+    }
+
+    private fun requestVpnPermission() {
+
+        try {
+
+            val intent =
+                VpnService.prepare(this)
+
+            if (intent != null) {
+
+                vpnPermissionLauncher.launch(intent)
+
+            } else {
+
+                startAdBlocker()
+            }
+
+        } catch (error: Exception) {
+
+            Toast.makeText(
+                this,
+                "VPN permission error: ${error.message}",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
     private fun startAdBlocker() {
-        try {
-            val intent = Intent(this, DnsVpnService::class.java).apply {
-                action = DnsVpnService.ACTION_START
-            }
 
-            startService(intent)
+        try {
+
+            val intent =
+                Intent(
+                    this,
+                    AdBlockVpnService::class.java
+                ).apply {
+                    action =
+                        AdBlockVpnService.ACTION_START
+                }
+
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.O
+            ) {
+
+                startForegroundService(intent)
+
+            } else {
+
+                startService(intent)
+            }
 
             Toast.makeText(
                 this,
-                "Ad blocker started",
+                "Starting DNS ad blocker...",
                 Toast.LENGTH_SHORT
             ).show()
 
-        } catch (e: Exception) {
+        } catch (error: Exception) {
+
             Toast.makeText(
                 this,
-                "Failed to start ad blocker: ${e.message}",
+                "Failed to start VPN: ${error.message}",
                 Toast.LENGTH_LONG
             ).show()
         }
     }
 
     private fun stopAdBlocker() {
+
         try {
-            val intent = Intent(this, DnsVpnService::class.java).apply {
-                action = DnsVpnService.ACTION_STOP
-            }
+
+            val intent =
+                Intent(
+                    this,
+                    AdBlockVpnService::class.java
+                ).apply {
+                    action =
+                        AdBlockVpnService.ACTION_STOP
+                }
 
             startService(intent)
 
@@ -112,91 +196,122 @@ class MainActivity : ComponentActivity() {
                 Toast.LENGTH_SHORT
             ).show()
 
-        } catch (e: Exception) {
+        } catch (error: Exception) {
+
             Toast.makeText(
                 this,
-                "Failed to stop ad blocker: ${e.message}",
+                "Failed to stop VPN: ${error.message}",
                 Toast.LENGTH_LONG
             ).show()
         }
     }
 
-    @androidx.compose.runtime.Composable
+    @Composable
     private fun AdBlockerScreen() {
 
         var enabled by remember {
-            mutableStateOf(false)
+            mutableStateOf(
+                AdBlockVpnService.isRunning
+            )
         }
 
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.Top,
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(
+                        rememberScrollState()
+                    )
+                    .padding(24.dp),
+
+            verticalArrangement =
+                Arrangement.Top,
+
+            horizontalAlignment =
+                Alignment.CenterHorizontally
         ) {
 
             Spacer(
-                modifier = Modifier.height(24.dp)
+                modifier =
+                    Modifier.height(24.dp)
             )
 
             Text(
                 text = "DNS Ad Blocker",
-                style = MaterialTheme.typography.headlineMedium
+                style =
+                    MaterialTheme.typography.headlineMedium
             )
 
             Spacer(
-                modifier = Modifier.height(8.dp)
+                modifier =
+                    Modifier.height(8.dp)
             )
 
             Text(
-                text = "Block advertisements and unwanted domains using a local VPN.",
-                style = MaterialTheme.typography.bodyMedium
+                text =
+                    "Block advertisements and trackers using a local DNS VPN.",
+                style =
+                    MaterialTheme.typography.bodyMedium
             )
 
             Spacer(
-                modifier = Modifier.height(32.dp)
+                modifier =
+                    Modifier.height(32.dp)
             )
 
             Card(
-                modifier = Modifier.fillMaxWidth()
+                modifier =
+                    Modifier.fillMaxWidth()
             ) {
 
                 Column(
-                    modifier = Modifier.padding(20.dp)
+                    modifier =
+                        Modifier.padding(20.dp)
                 ) {
 
                     Text(
-                        text = if (enabled) {
-                            "Protection enabled"
-                        } else {
-                            "Protection disabled"
-                        },
-                        style = MaterialTheme.typography.titleLarge
+                        text =
+                            if (enabled) {
+                                "Protection enabled"
+                            } else {
+                                "Protection disabled"
+                            },
+
+                        style =
+                            MaterialTheme.typography.titleLarge
                     )
 
                     Spacer(
-                        modifier = Modifier.height(8.dp)
+                        modifier =
+                            Modifier.height(8.dp)
                     )
 
                     Text(
-                        text = if (enabled) {
-                            "Your DNS traffic is being filtered."
-                        } else {
-                            "The ad blocker is currently stopped."
-                        },
-                        style = MaterialTheme.typography.bodyMedium
+                        text =
+                            if (enabled) {
+                                "DNS filtering VPN is running."
+                            } else {
+                                "The DNS filtering VPN is stopped."
+                            },
+
+                        style =
+                            MaterialTheme.typography.bodyMedium
                     )
 
                     Spacer(
-                        modifier = Modifier.height(20.dp)
+                        modifier =
+                            Modifier.height(20.dp)
                     )
 
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier =
+                            Modifier.fillMaxWidth(),
+
+                        horizontalArrangement =
+                            Arrangement.SpaceBetween,
+
+                        verticalAlignment =
+                            Alignment.CenterVertically
                     ) {
 
                         Text(
@@ -205,15 +320,18 @@ class MainActivity : ComponentActivity() {
 
                         Switch(
                             checked = enabled,
+
                             onCheckedChange = { checked ->
 
                                 if (checked) {
-                                    requestVpnPermission()
-                                } else {
-                                    stopAdBlocker()
-                                }
 
-                                enabled = checked
+                                    requestNotificationPermissionIfNeeded()
+
+                                } else {
+
+                                    stopAdBlocker()
+                                    enabled = false
+                                }
                             }
                         )
                     }
@@ -221,13 +339,18 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(
-                modifier = Modifier.height(24.dp)
+                modifier =
+                    Modifier.height(24.dp)
             )
 
             Button(
-                modifier = Modifier.fillMaxWidth(),
+                modifier =
+                    Modifier.fillMaxWidth(),
+
                 onClick = {
-                    requestVpnPermission()
+
+                    requestNotificationPermissionIfNeeded()
+
                     enabled = true
                 }
             ) {
@@ -235,13 +358,18 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(
-                modifier = Modifier.height(12.dp)
+                modifier =
+                    Modifier.height(12.dp)
             )
 
             OutlinedButton(
-                modifier = Modifier.fillMaxWidth(),
+                modifier =
+                    Modifier.fillMaxWidth(),
+
                 onClick = {
+
                     stopAdBlocker()
+
                     enabled = false
                 }
             ) {
@@ -249,44 +377,50 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(
-                modifier = Modifier.height(32.dp)
+                modifier =
+                    Modifier.height(32.dp)
             )
 
             Card(
-                modifier = Modifier.fillMaxWidth()
+                modifier =
+                    Modifier.fillMaxWidth()
             ) {
 
                 Column(
-                    modifier = Modifier.padding(20.dp)
+                    modifier =
+                        Modifier.padding(20.dp)
                 ) {
 
                     Text(
                         text = "How it works",
-                        style = MaterialTheme.typography.titleMedium
+
+                        style =
+                            MaterialTheme.typography.titleMedium
                     )
 
                     Spacer(
-                        modifier = Modifier.height(8.dp)
+                        modifier =
+                            Modifier.height(8.dp)
                     )
 
                     Text(
-                        text = "The application creates a local VPN connection and filters DNS requests. No root access is required."
+                        text =
+                            "The app creates an Android VPN interface and intercepts DNS requests. Blocked domains receive an NXDOMAIN response. Allowed DNS requests are forwarded to the upstream DNS server."
                     )
                 }
             }
 
             Spacer(
-                modifier = Modifier.height(24.dp)
+                modifier =
+                    Modifier.height(24.dp)
             )
 
             Text(
                 text = "Version 1.0.0",
-                style = MaterialTheme.typography.bodySmall
+
+                style =
+                    MaterialTheme.typography.bodySmall
             )
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
     }
 }
