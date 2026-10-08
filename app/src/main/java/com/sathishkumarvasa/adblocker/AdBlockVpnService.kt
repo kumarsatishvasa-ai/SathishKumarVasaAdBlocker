@@ -1,5 +1,3 @@
-writing{variant="standard" id="58321" title="File 3 — AdBlockVpnService.kt"}
-
 package com.sathishkumarvasa.adblocker
 
 import android.app.Notification
