@@ -747,16 +747,12 @@ vpnInterface = null
 
 try { descriptor?.close() } catch (_: Exception) { }
 
-if ( Build.VERSION.SDKINT >= Build.VERSIONCODES.N ) {
-
-stopForeground( STOPFOREGROUNDREMOVE )
-
+if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+    stopForeground(STOP_FOREGROUND_REMOVE)
 } else {
-
-@Suppress("DEPRECATION") stopForeground(true) }
-
-stopSelf() }
-
+    @Suppress("DEPRECATION")
+    stopForeground(true)
+}
 // ============================================================ // VPN REVOKED // ============================================================
 
 override fun onRevoke() {
