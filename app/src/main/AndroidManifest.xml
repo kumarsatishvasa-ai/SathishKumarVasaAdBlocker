@@ -1,29 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-<!-- Internet access for downloading filter lists and contacting DNS --> <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
-<!-- Foreground VPN service --> <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AdBlocker">
 
-<!-- Android 14+ special-use foreground service --> <uses-permission android:name="android.permission.FOREGROUNDSERVICESPECIAL_USE" />
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
 
-<!-- Android 13+ notifications --> <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
 
-<application android:allowBackup="true" android:icon="@android:drawable/symdefappicon" android:label="@string/appname" android:roundIcon="@android:drawable/symdefapp_icon" android:supportsRtl="true" android:theme="@style/Theme.AdBlocker">
+        </activity>
 
-<!-- Main application screen --> <activity android:name=".MainActivity" android:exported="true">
+        <service
+            android:name=".AdBlockVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
 
-<intent-filter> <action android:name="android.intent.action.MAIN" /> <category android:name="android.intent.category.LAUNCHER" /> </intent-filter>
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
 
-</activity>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
 
-<!-- Local DNS-filtering VPN --> <service android:name=".AdBlockVpnService" android:exported="false" android:permission="android.permission.BINDVPNSERVICE" android:foregroundServiceType="specialUse">
+        </service>
 
-<intent-filter> <action android:name="android.net.VpnService" /> </intent-filter>
-
-<property android:name="android.app.PROPERTYSPECIALUSEFGSSUBTYPE" android:value="dnsfilteringvpn" />
-
-</service>
-
-</application>
+    </application>
 
 </manifest>
