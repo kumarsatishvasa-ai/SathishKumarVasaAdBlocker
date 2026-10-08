@@ -11,15 +11,23 @@ import java.net.URI
 import java.util.Locale
 
 /**
- * DNS-oriented filter manager.
+ * DNS-oriented ad/tracker filter manager.
  *
- * Important:
- * This converts browser filter rules into domain/hostname rules
- * suitable for DNS blocking.
+ * Design goals:
  *
- * DNS filtering cannot reproduce all EasyList syntax. Cosmetic
- * rules, script rules, URL-path rules, and other browser-only
- * rules are intentionally ignored.
+ * 1. Keep Chrome + Google Search + YouTube connectivity working.
+ * 2. Only create DNS hostname rules.
+ * 3. Ignore cosmetic/browser-only EasyList rules.
+ * 4. Never block Google/YouTube infrastructure from downloaded lists.
+ * 5. Fail open when the filter database cannot be updated/read.
+ * 6. Preserve an existing working database if a download fails.
+ *
+ * IMPORTANT:
+ *
+ * DNS blocking cannot reliably remove every YouTube advertisement.
+ * YouTube can use the same infrastructure for advertisements and
+ * normal video/content traffic. Blocking large Google/YouTube
+ * infrastructure domains can therefore break YouTube.
  */
 object FilterManager {
 
@@ -34,12 +42,6 @@ object FilterManager {
     private const val KEY_LAST_UPDATE =
         "last_update"
 
-    /*
-     * Keep the database reasonably sized for SharedPreferences.
-     *
-     * If you later move the database to Room/SQLite, this can
-     * safely be increased substantially.
-     */
     private const val MAX_HOSTS = 100_000
 
     private const val CONNECT_TIMEOUT_MS = 15_000
@@ -49,11 +51,109 @@ object FilterManager {
     private const val MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
     /*
-     * These lists are converted into DNS hostname rules.
+     * DNS-compatible public filter lists.
      */
     private val FILTER_LISTS = listOf(
         "https://easylist.to/easylist/easylist.txt",
         "https://easylist.to/easylist/easyprivacy.txt"
+    )
+
+    /*
+     * Domains that must NEVER be blocked by the DNS filter.
+     *
+     * These are deliberately limited to infrastructure needed by
+     * Google Search, Chrome's Google services and YouTube.
+     *
+     * The allowlist is checked against the queried hostname and
+     * all of its parent domains.
+     */
+    private val PROTECTED_DOMAINS = setOf(
+
+        // --------------------------------------------------------
+        // Google core
+        // --------------------------------------------------------
+
+        "google.com",
+        "google.co.in",
+        "googleapis.com",
+        "gstatic.com",
+        "googleusercontent.com",
+        "googlevideo.com",
+
+        // --------------------------------------------------------
+        // Google authentication / accounts
+        // --------------------------------------------------------
+
+        "accounts.google.com",
+        "accounts.google.co.in",
+        "myaccount.google.com",
+
+        // --------------------------------------------------------
+        // Google Search
+        // --------------------------------------------------------
+
+        "www.google.com",
+        "www.google.co.in",
+        "www.googleapis.com",
+
+        // --------------------------------------------------------
+        // Google static/service infrastructure
+        // --------------------------------------------------------
+
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "ssl.gstatic.com",
+        "apis.google.com",
+        "clients1.google.com",
+        "clients2.google.com",
+        "clients3.google.com",
+        "clients4.google.com",
+        "clients5.google.com",
+
+        // --------------------------------------------------------
+        // YouTube
+        // --------------------------------------------------------
+
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtube-nocookie.com",
+        "www.youtube-nocookie.com",
+
+        // YouTube API / player
+        "youtubei.googleapis.com",
+        "youtube.googleapis.com",
+
+        // YouTube images/thumbnails
+        "ytimg.com",
+        "i.ytimg.com",
+        "s.ytimg.com",
+
+        // YouTube video delivery
+        "googlevideo.com",
+
+        // YouTube related services
+        "youtu.be",
+        "youtubeeducation.com",
+
+        // --------------------------------------------------------
+        // Google telemetry/service endpoints that can be required
+        // by Chrome/Google services.
+        // --------------------------------------------------------
+
+        "gvt1.com",
+        "gvt2.com",
+        "gvt3.com",
+        "gvt5.com",
+        "gvt6.com",
+
+        // --------------------------------------------------------
+        // Chrome update/service infrastructure
+        // --------------------------------------------------------
+
+        "googleusercontent.com",
+        "chrome.com",
+        "chromium.org"
     )
 
     // ============================================================
@@ -64,30 +164,36 @@ object FilterManager {
         context: Context
     ): Boolean = withContext(Dispatchers.IO) {
 
-        val newHosts = LinkedHashSet<String>()
+        val newHosts =
+            LinkedHashSet<String>()
 
         var successfulDownloads = 0
 
         try {
+
             for (url in FILTER_LISTS) {
 
                 if (newHosts.size >= MAX_HOSTS) {
                     break
                 }
 
-                val text = downloadFilterList(url)
+                val text =
+                    downloadFilterList(url)
 
                 if (text.isBlank()) {
+
                     Log.w(
                         TAG,
                         "Empty filter list: $url"
                     )
+
                     continue
                 }
 
                 successfulDownloads++
 
-                val parsed = parseFilterList(text)
+                val parsed =
+                    parseFilterList(text)
 
                 for (host in parsed) {
 
@@ -95,7 +201,20 @@ object FilterManager {
                         break
                     }
 
-                    if (!isAllowlisted(context, host)) {
+                    /*
+                     * Protected Google/YouTube infrastructure always
+                     * wins over downloaded filter rules.
+                     */
+                    if (isProtectedHost(host)) {
+                        continue
+                    }
+
+                    if (
+                        !isAllowlisted(
+                            context,
+                            host
+                        )
+                    ) {
                         newHosts.add(host)
                     }
                 }
@@ -107,7 +226,9 @@ object FilterManager {
             }
 
             /*
-             * Add application-specific custom rules.
+             * Add user-defined custom rules.
+             *
+             * Protected Google/YouTube domains are still protected.
              */
             addCustomRules(
                 context = context,
@@ -115,13 +236,13 @@ object FilterManager {
             )
 
             /*
-             * Never destroy a previously working filter database
-             * simply because the network was unavailable.
+             * If every download failed, preserve the existing
+             * database rather than replacing it with an empty one.
              */
             if (
-                successfulDownloads == 0 &&
-                newHosts.isEmpty()
+                successfulDownloads == 0
             ) {
+
                 Log.w(
                     TAG,
                     "No filter list downloaded. Existing database preserved."
@@ -131,41 +252,56 @@ object FilterManager {
             }
 
             /*
-             * It is possible for a successful list to contain no
-             * DNS-compatible rules. Do not erase a useful database
-             * in that situation.
+             * A successful download that produces zero rules is
+             * not considered a reason to destroy a working database.
              */
-            if (
-                successfulDownloads > 0 &&
-                newHosts.isEmpty()
-            ) {
+            if (newHosts.isEmpty()) {
+
                 Log.w(
                     TAG,
-                    "Filter download succeeded but produced zero DNS hosts. Existing database preserved."
+                    "Filter download succeeded but produced zero DNS rules. Existing database preserved."
                 )
 
                 return@withContext false
             }
 
+            /*
+             * Always remove protected hosts before saving.
+             *
+             * This is an additional safety layer.
+             */
+            val safeHosts =
+                newHosts
+                    .filterNot {
+                        isProtectedHost(it)
+                    }
+                    .toSet()
+
             saveBlockedHosts(
                 context,
-                newHosts
+                safeHosts
             )
 
             updateStatistics(
                 context,
-                newHosts.size
+                safeHosts.size
             )
 
             Log.i(
                 TAG,
-                "DNS filter database updated: ${newHosts.size} hosts"
+                "DNS filter database updated: ${safeHosts.size} hosts"
             )
 
             true
 
         } catch (e: Exception) {
 
+            /*
+             * FAIL OPEN.
+             *
+             * An error updating the filter list must never cause
+             * Chrome, Google Search or YouTube to stop working.
+             */
             Log.e(
                 TAG,
                 "Filter update failed. Existing database preserved.",
@@ -189,16 +325,22 @@ object FilterManager {
             return
         }
 
-        val customRules = try {
-            AdBlockStorage.getCustomRules(context)
-        } catch (e: Exception) {
-            Log.w(
-                TAG,
-                "Could not read custom rules",
-                e
-            )
-            emptySet<String>()
-        }
+        val customRules =
+            try {
+
+                AdBlockStorage
+                    .getCustomRules(context)
+
+            } catch (e: Exception) {
+
+                Log.w(
+                    TAG,
+                    "Could not read custom rules",
+                    e
+                )
+
+                emptySet()
+            }
 
         for (rule in customRules) {
 
@@ -206,12 +348,36 @@ object FilterManager {
                 break
             }
 
-            val host = extractHostname(rule)
+            val host =
+                extractHostname(rule)
+                    ?: continue
 
             if (
-                host != null &&
-                isValidHostname(host) &&
-                !isAllowlisted(context, host)
+                !isValidHostname(host)
+            ) {
+                continue
+            }
+
+            /*
+             * Never allow a custom rule to accidentally block
+             * Google/YouTube infrastructure.
+             */
+            if (
+                isProtectedHost(host)
+            ) {
+                Log.d(
+                    TAG,
+                    "Ignoring protected custom rule: $host"
+                )
+
+                continue
+            }
+
+            if (
+                !isAllowlisted(
+                    context,
+                    host
+                )
             ) {
                 hosts.add(host)
             }
@@ -226,14 +392,16 @@ object FilterManager {
         url: String
     ): String {
 
-        var connection: HttpURLConnection? = null
+        var connection:
+            HttpURLConnection? = null
 
         return try {
 
             connection =
                 URI(url)
                     .toURL()
-                    .openConnection() as HttpURLConnection
+                    .openConnection()
+                    as HttpURLConnection
 
             connection.connectTimeout =
                 CONNECT_TIMEOUT_MS
@@ -263,7 +431,9 @@ object FilterManager {
             val responseCode =
                 connection.responseCode
 
-            if (responseCode !in 200..299) {
+            if (
+                responseCode !in 200..299
+            ) {
 
                 Log.w(
                     TAG,
@@ -312,7 +482,8 @@ object FilterManager {
                         ).size + 1
 
                     if (
-                        totalBytes > MAX_DOWNLOAD_BYTES
+                        totalBytes >
+                        MAX_DOWNLOAD_BYTES
                     ) {
 
                         Log.w(
@@ -366,18 +537,29 @@ object FilterManager {
 
         reader.forEachLine { rawLine ->
 
-            if (hosts.size >= MAX_HOSTS) {
+            if (
+                hosts.size >= MAX_HOSTS
+            ) {
                 return@forEachLine
             }
 
             val host =
                 parseFilterLine(rawLine)
+                    ?: return@forEachLine
 
             if (
-                host != null &&
                 isValidHostname(host)
             ) {
-                hosts.add(host)
+
+                /*
+                 * Filter protected domains before they ever enter
+                 * the candidate database.
+                 */
+                if (
+                    !isProtectedHost(host)
+                ) {
+                    hosts.add(host)
+                }
             }
         }
 
@@ -400,13 +582,13 @@ object FilterManager {
         }
 
         /*
-         * BOM occasionally appears at the beginning of a file.
+         * Remove BOM.
          */
         line =
             line.removePrefix("\uFEFF")
 
         /*
-         * EasyList comments.
+         * Comments.
          */
         if (
             line.startsWith("!")
@@ -414,8 +596,14 @@ object FilterManager {
             return null
         }
 
+        if (
+            line.startsWith("#")
+        ) {
+            return null
+        }
+
         /*
-         * Hosts/filter metadata.
+         * Filter metadata.
          */
         if (
             line.startsWith("[")
@@ -424,8 +612,10 @@ object FilterManager {
         }
 
         /*
-         * Exception rules cannot safely be represented by this
-         * simple DNS blocklist.
+         * Exception rules are deliberately ignored here.
+         *
+         * DNS cannot safely reproduce every browser-level
+         * exception rule.
          */
         if (
             line.startsWith("@@")
@@ -434,7 +624,7 @@ object FilterManager {
         }
 
         /*
-         * Cosmetic rules are browser-side rules.
+         * Cosmetic/browser rules are not DNS rules.
          */
         if (
             line.contains("##") ||
@@ -449,38 +639,31 @@ object FilterManager {
         }
 
         /*
-         * Scriptlet rules and other extended syntax.
+         * Scriptlet and extended rules.
          */
         if (
             line.contains("##+") ||
-            line.contains("#?#") ||
             line.contains("#@#+")
         ) {
             return null
         }
 
         /*
-         * Remove inline comments occasionally found in
-         * hosts-style lists.
-         */
-        if (line.startsWith("#")) {
-            return null
-        }
-
-        /*
-         * Network filter options.
+         * Network options.
          *
          * Example:
          *
          * ||ads.example.com^$script,image
          *
-         * The domain before '$' can still be useful for DNS
-         * blocking, so keep the part before the option.
+         * Keep the hostname portion.
          */
         val dollarIndex =
             line.indexOf('$')
 
-        if (dollarIndex >= 0) {
+        if (
+            dollarIndex >= 0
+        ) {
+
             line =
                 line.substring(
                     0,
@@ -514,12 +697,7 @@ object FilterManager {
         }
 
         /*
-         * Hosts-file syntax:
-         *
-         * 0.0.0.0 ads.example.com
-         * 127.0.0.1 ads.example.com
-         * :: ads.example.com
-         * ::1 ads.example.com
+         * Hosts-file syntax.
          */
         val whitespaceParts =
             value.split(
@@ -545,25 +723,26 @@ object FilterManager {
         if (
             value.startsWith("||")
         ) {
+
             value =
                 value.substring(2)
         }
 
         /*
-         * Remove URL schemes.
+         * Remove schemes.
          */
-        value =
-            value.removePrefix(
-                "http://"
-            )
-
         value =
             value.removePrefix(
                 "https://"
             )
 
+        value =
+            value.removePrefix(
+                "http://"
+            )
+
         /*
-         * Remove leading pipe anchors.
+         * Remove leading filter anchors.
          */
         while (
             value.startsWith("|")
@@ -575,13 +754,13 @@ object FilterManager {
 
         /*
          * ABP separator.
-         *
-         * ads.example.com^
          */
         val separatorIndex =
             value.indexOf('^')
 
-        if (separatorIndex >= 0) {
+        if (
+            separatorIndex >= 0
+        ) {
 
             value =
                 value.substring(
@@ -591,12 +770,14 @@ object FilterManager {
         }
 
         /*
-         * Remove URL path.
+         * URL path.
          */
         val slashIndex =
             value.indexOf('/')
 
-        if (slashIndex >= 0) {
+        if (
+            slashIndex >= 0
+        ) {
 
             value =
                 value.substring(
@@ -606,12 +787,14 @@ object FilterManager {
         }
 
         /*
-         * Remove query.
+         * Query.
          */
         val questionIndex =
             value.indexOf('?')
 
-        if (questionIndex >= 0) {
+        if (
+            questionIndex >= 0
+        ) {
 
             value =
                 value.substring(
@@ -621,12 +804,14 @@ object FilterManager {
         }
 
         /*
-         * Remove fragment.
+         * Fragment.
          */
         val fragmentIndex =
             value.indexOf('#')
 
-        if (fragmentIndex >= 0) {
+        if (
+            fragmentIndex >= 0
+        ) {
 
             value =
                 value.substring(
@@ -636,7 +821,7 @@ object FilterManager {
         }
 
         /*
-         * DNS has no concept of wildcard hostnames.
+         * DNS cannot represent wildcard hostnames.
          */
         if (
             value.contains("*") ||
@@ -647,12 +832,14 @@ object FilterManager {
         }
 
         /*
-         * Remove a port.
+         * Remove port.
          */
         val colonIndex =
             value.indexOf(':')
 
-        if (colonIndex >= 0) {
+        if (
+            colonIndex >= 0
+        ) {
 
             value =
                 value.substring(
@@ -662,9 +849,9 @@ object FilterManager {
         }
 
         value =
-            value.trim()
+            value
+                .trim()
                 .trim('.')
-                .removePrefix("www.")
                 .lowercase(Locale.US)
 
         if (value.isEmpty()) {
@@ -672,7 +859,7 @@ object FilterManager {
         }
 
         /*
-         * Reject values that clearly aren't hostnames.
+         * Reject obvious non-host values.
          */
         if (
             value.contains("=") ||
@@ -686,9 +873,6 @@ object FilterManager {
             return null
         }
 
-        /*
-         * Don't turn an entire URL into a hostname.
-         */
         if (
             value.contains("://")
         ) {
@@ -696,6 +880,75 @@ object FilterManager {
         }
 
         return value
+    }
+
+    // ============================================================
+    // PROTECTED HOSTS
+    // ============================================================
+
+    private fun isProtectedHost(
+        hostname: String
+    ): Boolean {
+
+        val normalized =
+            hostname
+                .trim()
+                .trim('.')
+                .lowercase(Locale.US)
+
+        if (normalized.isEmpty()) {
+            return false
+        }
+
+        /*
+         * Exact protected match.
+         */
+        if (
+            PROTECTED_DOMAINS.contains(
+                normalized
+            )
+        ) {
+            return true
+        }
+
+        /*
+         * Parent-domain protected match.
+         *
+         * Example:
+         *
+         * foo.youtube.com
+         *
+         * is protected by:
+         *
+         * youtube.com
+         */
+        var current =
+            normalized
+
+        while (true) {
+
+            val dot =
+                current.indexOf('.')
+
+            if (dot < 0) {
+                break
+            }
+
+            current =
+                current.substring(
+                    dot + 1
+                )
+
+            if (
+                PROTECTED_DOMAINS.contains(
+                    current
+                )
+            ) {
+                return true
+            }
+        }
+
+        return false
     }
 
     // ============================================================
@@ -741,7 +994,7 @@ object FilterManager {
         }
 
         /*
-         * Don't block local device names.
+         * Never block local device names.
          */
         if (
             host == "localhost" ||
@@ -752,7 +1005,7 @@ object FilterManager {
         }
 
         /*
-         * Don't store IP addresses as domain rules.
+         * Never store IP addresses as hostname rules.
          */
         if (
             isIpv4Address(host)
@@ -770,7 +1023,7 @@ object FilterManager {
             host.split(".")
 
         /*
-         * DNS ad blocking is intended for domain names.
+         * DNS ad blocking should operate on domain names.
          */
         if (
             labels.size < 2
@@ -854,12 +1107,6 @@ object FilterManager {
         value: String
     ): Boolean {
 
-        /*
-         * This is intentionally conservative.
-         *
-         * Hostnames cannot contain ':' anyway, so any value
-         * containing ':' is treated as a non-host value.
-         */
         return value.contains(":")
     }
 
@@ -905,12 +1152,14 @@ object FilterManager {
         val allowlist =
             getNormalizedAllowlist(context)
 
-        if (allowlist.isEmpty()) {
+        if (
+            allowlist.isEmpty()
+        ) {
             return false
         }
 
         /*
-         * Exact allowlist match.
+         * Exact match.
          */
         if (
             allowlist.contains(normalized)
@@ -919,16 +1168,7 @@ object FilterManager {
         }
 
         /*
-         * Parent domain allowlisting.
-         *
-         * Allowing:
-         *
-         * example.com
-         *
-         * also allows:
-         *
-         * ads.example.com
-         * cdn.example.com
+         * Parent-domain match.
          */
         var current =
             normalized
@@ -979,10 +1219,14 @@ object FilterManager {
          * Handle accidental URL input in the allowlist.
          */
         value =
-            value.removePrefix("https://")
+            value.removePrefix(
+                "https://"
+            )
 
         value =
-            value.removePrefix("http://")
+            value.removePrefix(
+                "http://"
+            )
 
         value =
             value.substringBefore('/')
@@ -994,10 +1238,13 @@ object FilterManager {
             value.substringBefore('#')
 
         value =
-            value.trim()
+            value
+                .trim()
                 .trim('.')
 
-        if (!isValidHostname(value)) {
+        if (
+            !isValidHostname(value)
+        ) {
             return null
         }
 
@@ -1014,8 +1261,8 @@ object FilterManager {
     ) {
 
         /*
-         * Make a copy so SharedPreferences does not retain
-         * a mutable set owned by another operation.
+         * Make an immutable copy before passing it to
+         * SharedPreferences.
          */
         val immutableCopy =
             hosts.toSet()
@@ -1064,7 +1311,19 @@ object FilterManager {
                 ?: return false
 
         /*
-         * Allowlist always wins.
+         * ABSOLUTE SAFETY RULE:
+         *
+         * Google/YouTube infrastructure is never blocked by this
+         * filter manager.
+         */
+        if (
+            isProtectedHost(normalized)
+        ) {
+            return false
+        }
+
+        /*
+         * User allowlist wins.
          */
         if (
             isAllowlisted(
@@ -1078,7 +1337,9 @@ object FilterManager {
         val blockedHosts =
             getBlockedHosts(context)
 
-        if (blockedHosts.isEmpty()) {
+        if (
+            blockedHosts.isEmpty()
+        ) {
             return false
         }
 
@@ -1096,13 +1357,14 @@ object FilterManager {
          *
          * Example:
          *
-         * query:
-         * ad.doubleclick.example.com
+         * ads.tracker.example.com
          *
-         * rule:
-         * example.com
+         * can match:
          *
-         * => blocked
+         * tracker.example.com
+         *
+         * but protected Google/YouTube domains were already
+         * rejected above.
          */
         var current =
             normalized
@@ -1120,6 +1382,16 @@ object FilterManager {
                 current.substring(
                     dot + 1
                 )
+
+            /*
+             * Never allow a parent-domain match to cross into
+             * protected infrastructure.
+             */
+            if (
+                isProtectedHost(current)
+            ) {
+                return false
+            }
 
             if (
                 blockedHosts.contains(current)
